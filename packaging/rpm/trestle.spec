@@ -103,6 +103,7 @@ fi
 %{_libexecdir}/cni/trestle
 %dir %{_sysconfdir}/trestle
 %dir %{_sysconfdir}/trestle/conf.d
+%dir %{_sysconfdir}/trestle/hooks
 %config(noreplace) %{_sysconfdir}/trestle/trestle.conf
 %{_sysconfdir}/trestle/conf.d/README
 %{_unitdir}/trestled.service

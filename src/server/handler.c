@@ -20,6 +20,9 @@
 #include "bridge.h"
 #include "checks.h"
 #include "dnsout.h"
+#include "hooks.h"
+#include "netset.h"
+#include "nft.h"
 #include "netlink.h"
 #include "state.h"
 
@@ -37,6 +40,7 @@ struct hctx {
 	int nsfd;                 /* fd passed by the client, -1 if none */
 	bool rootless;
 	const struct tr_network *net;
+	struct tr_network net_storage;   /* network made from [network:*] */
 	int nlfd;                 /* host netlink socket */
 	char err[1024];
 	int cni_code;
@@ -183,6 +187,64 @@ static int get_netns(struct hctx *h)
 	return 0;
 }
 
+/* ---- hook scripts ---------------------------------------------------- */
+
+static void hook_base(struct hctx *h, struct hook_info *hi, const char *event)
+{
+	memset(hi, 0, sizeof(*hi));
+	hi->event = event;
+	hi->mode = h->mode == TR_MODE_CNI ? "cni" : "netavark";
+	hi->command = h->req.command;
+	hi->net = h->net;
+	hi->user = h->peer.user;
+	hi->uid = h->peer.uid;
+	hi->gid = h->peer.gid;
+	hi->rootless = h->rootless;
+	hi->netns_fd = -1;
+	if (h->req.container_id[0])
+		hi->container_id = h->req.container_id;
+	if (h->req.container_name[0])
+		hi->container_name = h->req.container_name;
+	hi->aliases = &h->req.aliases;
+	hi->k8s_pod_name = h->req.k8s_pod_name;
+	hi->k8s_pod_namespace = h->req.k8s_pod_namespace;
+	hi->netns_path = h->req.netns_path;
+	if (h->req.ifname[0])
+		hi->container_ifname = h->req.ifname;
+}
+
+/* Run a hook if configured. Returns -1 only when it failed and the network
+ * has script_on_error = fail (and fail_allowed is true). */
+static int run_hook(struct hctx *h, const char *script, const struct hook_info *hi, bool fail_allowed)
+{
+	char err[512];
+	if (!script || !script[0])
+		return 0;
+	log_debug("running %s script %s for network %s", hi->event, script, h->net->name);
+	if (hook_run(script, hi, h->net->script_timeout, err, sizeof(err)) == 0)
+		return 0;
+	if (fail_allowed && h->net->script_fail) {
+		failf(h, CNI_ERR_PLUGIN, "%s", err);
+		return -1;
+	}
+	log_warn("%s (ignored)", err);
+	return 0;
+}
+
+static int run_create_hook(struct hctx *h, bool bridge_created, const char *podman_id)
+{
+	struct hook_info hi;
+	hook_base(h, &hi, "create");
+	hi.bridge_created = bridge_created;
+	hi.podman_network_id = podman_id;
+	/* the network event carries no container details */
+	hi.container_id = hi.container_name = hi.container_ifname = NULL;
+	hi.aliases = NULL;
+	hi.k8s_pod_name = hi.k8s_pod_namespace = NULL;
+	hi.netns_path = NULL;
+	return run_hook(h, h->net->create_script, &hi, true);
+}
+
 /* ---- attach (CNI ADD / Netavark setup) ------------------------------ */
 
 static char *build_add_output(struct hctx *h, const struct tr_attachment *a, const char *host_mac)
@@ -269,11 +331,15 @@ static int do_attach(struct hctx *h, char **out)
 	if (get_netns(h) < 0)
 		return -1;
 
-	int br = bridge_ensure(h->nlfd, cfg, n, h->err, sizeof(h->err));
+	bool br_created = false;
+	int br = bridge_ensure(h->nlfd, cfg, n, &br_created, h->err, sizeof(h->err));
 	if (br < 0) {
 		h->cni_code = CNI_ERR_PLUGIN;
 		return -1;
 	}
+	/* a network comes into existence on the host when its bridge is made */
+	if (br_created && run_create_hook(h, true, NULL) < 0)
+		return -1;
 
 	if (state_load(cfg->state_dir, n->name, h->req.container_id, &existing) == 0) {
 		attachment_free(&existing);
@@ -381,6 +447,32 @@ static int do_attach(struct hctx *h, char **out)
 	}
 	dns_refresh(cfg, n);
 
+	if (n->setup_script[0]) {
+		struct hook_info hi;
+		hook_base(h, &hi, "setup");
+		hi.bridge_created = br_created;
+		hi.host_ifname = a.veth;
+		hi.container_ifname = a.ifname;
+		hi.host_mac = host_mac;
+		hi.container_mac = a.mac;
+		hi.has_ip = a.has_ip;
+		hi.ip = a.ip;
+		hi.prefix = a.prefix;
+		hi.netns_fd = h->nsfd;
+		if (run_hook(h, n->setup_script, &hi, true) < 0) {
+			/* undo the attachment: the container must not run half set up */
+			state_delete(cfg->state_dir, n->name, a.container_id);
+			if (nl_get_link(h->nlfd, a.veth, &l) == 0)
+				nl_del_link(h->nlfd, l.ifindex);
+			veth_created = false;
+			ipam_release(cfg->state_dir, n->name, a.container_id);
+			ip_taken = false;
+			dns_refresh(cfg, n);
+			bridge_maybe_remove(h->nlfd, cfg, n);
+			goto fail;
+		}
+	}
+
 	char ipbuf[16] = "-";
 	if (a.has_ip)
 		tr_fmt_ipv4(a.ip, ipbuf);
@@ -425,7 +517,33 @@ static int do_detach(struct hctx *h)
 	}
 
 	struct nl_link l;
-	if (nl_get_link(h->nlfd, veth, &l) == 0) {
+	bool have_link = nl_get_link(h->nlfd, veth, &l) == 0;
+
+	/* teardown hook runs while the interfaces still exist; its failure
+	 * never stops the teardown */
+	if (n->teardown_script[0]) {
+		struct hook_info hi;
+		char host_mac[18] = "";
+		hook_base(h, &hi, "teardown");
+		hi.host_ifname = veth;
+		if (have_link && l.has_mac) {
+			mac_fmt(l.mac, host_mac);
+			hi.host_mac = host_mac;
+		}
+		if (have_rec) {
+			hi.container_name = a.container_name;
+			hi.container_ifname = a.ifname;
+			hi.container_mac = a.mac[0] ? a.mac : NULL;
+			hi.has_ip = a.has_ip;
+			hi.ip = a.ip;
+			hi.prefix = a.prefix;
+			if (a.aliases.n)
+				hi.aliases = &a.aliases;
+		}
+		run_hook(h, n->teardown_script, &hi, false);
+	}
+
+	if (have_link) {
 		struct nl_link br;
 		bool ours = strncmp(l.alias, "trestle:", 8) == 0 && !strcmp(l.kind, "veth");
 		bool on_bridge = nl_get_link(h->nlfd, n->bridge, &br) == 0 && l.master == br.ifindex;
@@ -514,8 +632,13 @@ static int do_create(struct hctx *h, char **out)
 		return failf(h, 0, "network %s uses bridge %s (from trestle configuration), not %s",
 			     n->name, n->bridge, json_object_get_string(v));
 
-	int br = bridge_ensure(h->nlfd, h->cfg, n, h->err, sizeof(h->err));
+	bool br_created = false;
+	int br = bridge_ensure(h->nlfd, h->cfg, n, &br_created, h->err, sizeof(h->err));
 	if (br < 0)
+		return -1;
+	json_object *idv;
+	const char *podman_id = json_object_object_get_ex(in, "id", &idv) ? json_object_get_string(idv) : NULL;
+	if (run_create_hook(h, br_created, podman_id) < 0)
 		return -1;
 
 	json_object_object_add(in, "network_interface", json_object_new_string(n->bridge));
@@ -594,9 +717,14 @@ void handle_connection(const struct tr_config *cfg, int sock)
 	}
 
 	/* 1. the network must be configured and the user permitted */
-	h.net = config_find_network(cfg, h.req.network);
-	if (!h.net) {
+	/* explicit [network:NAME] section, else the [network:*] catch-all */
+	r = net_resolve(cfg, h.req.network, false, &h.net_storage, &h.net, NULL, h.err, sizeof(h.err));
+	if (r == 1) {
 		failf(&h, CNI_ERR_INVALID_CONFIG, "network '%s' is not permitted by trestle", h.req.network);
+		goto error;
+	}
+	if (r < 0) {
+		h.cni_code = CNI_ERR_IO;
 		goto error;
 	}
 	char why[128];
@@ -614,6 +742,20 @@ void handle_connection(const struct tr_config *cfg, int sock)
 	if (lockfd < 0 || flock(lockfd, LOCK_EX) < 0) {
 		failf(&h, CNI_ERR_IO, "cannot lock %s: %s", lockpath, strerror(errno));
 		goto error;
+	}
+
+	/* a network from [network:*] is recorded (and gets its subnet from
+	 * subnet_pool) the first time something is attached or created */
+	if (h.net->from_wildcard && (h.req.cmd == TR_CMD_CNI_ADD || h.req.cmd == TR_CMD_NV_SETUP ||
+				     h.req.cmd == TR_CMD_NV_CREATE)) {
+		bool created = false;
+		if (net_resolve(cfg, h.req.network, true, &h.net_storage, &h.net, &created,
+				h.err, sizeof(h.err)) != 0) {
+			h.cni_code = CNI_ERR_PLUGIN;
+			goto error;
+		}
+		if (created && (h.net->firewall || h.net->masquerade))
+			nft_apply(cfg);   /* add the new bridge/subnet to the ruleset */
 	}
 
 	h.nlfd = nl_open();

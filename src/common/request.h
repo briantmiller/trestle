@@ -50,6 +50,8 @@ struct tr_request {
 	struct strv static_ips;           /* requested IPv4 addresses (no prefix) */
 	char static_mac[18];
 	struct strv aliases;              /* Netavark DNS aliases */
+	char k8s_pod_name[TR_MAX_NAME + 1];      /* CNI_ARGS, may be empty */
+	char k8s_pod_namespace[TR_MAX_NAME + 1];
 
 	json_object *input;               /* parsed stdin, owned */
 };

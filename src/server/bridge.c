@@ -91,9 +91,11 @@ const char *bridge_foreign_manager(const char *prefix, const char *name, int ifi
 }
 
 int bridge_ensure(int nlfd, const struct tr_config *cfg, const struct tr_network *net,
-		  char *err, size_t errlen)
+		  bool *created, char *err, size_t errlen)
 {
 	struct nl_link l;
+	if (created)
+		*created = false;
 	int r = nl_get_link(nlfd, net->bridge, &l);
 	if (r == -ENODEV) {
 		r = nl_create_bridge(nlfd, net->bridge, net->mtu, net->stp, net->vlan_filtering);
@@ -102,6 +104,8 @@ int bridge_ensure(int nlfd, const struct tr_config *cfg, const struct tr_network
 			return -1;
 		}
 		if (!r) {
+			if (created)
+				*created = true;
 			state_mark_bridge(cfg->state_dir, net->bridge, net->name);
 			log_info("created bridge %s for network %s", net->bridge, net->name);
 		}

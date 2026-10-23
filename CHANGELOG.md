@@ -16,5 +16,11 @@ Initial release.
 * nftables filtering and masquerading per network.
 * Safe bridge removal (only bridges trestle created and no other manager
   claims).
+* `[network:*]` catch-all section for networks without their own section,
+  with a `subnet_pool` / `subnet_prefix` giving each network its own subnet,
+  and `%n` (network name) in `dnsmasq_hosts`.
+* Per-network hook scripts (`create_script`, `setup_script`,
+  `teardown_script`, `script_timeout`, `script_on_error`) with `TRESTLE_*`
+  environment variables and the container netns passed as fd 3.
 * systemd unit, SELinux module, man pages, RPM / Debian / Arch packaging,
   unit and integration tests.

@@ -69,7 +69,7 @@ BUILD := build
 COMMON_SRC := src/common/md5.c src/common/log.c src/common/util.c src/common/config.c \
               src/common/naming.c src/common/proto.c src/common/request.c
 SERVER_SRC := src/server/main.c src/server/handler.c src/server/netlink.c src/server/checks.c \
-              src/server/state.c src/server/dnsout.c src/server/nft.c src/server/bridge.c
+              src/server/state.c src/server/dnsout.c src/server/nft.c src/server/bridge.c src/server/hooks.c src/server/netset.c
 CLIENT_SRC := src/client/trestle.c
 SERVER_LIB_SRC := $(filter-out src/server/main.c,$(SERVER_SRC))
 
@@ -124,6 +124,7 @@ install: all
 		chmod 0644 $(DESTDIR)$(SYSCONFDIR)/$(NAME)/trestle.conf; \
 	else echo "keeping existing $(SYSCONFDIR)/$(NAME)/trestle.conf"; fi
 	$(INSTALL) -m 0644 etc/conf.d/README $(DESTDIR)$(SYSCONFDIR)/$(NAME)/conf.d/README
+	$(INSTALL) -d -m 0755 $(DESTDIR)$(SYSCONFDIR)/$(NAME)/hooks
 	sed -e 's|@SBINDIR@|$(SBINDIR)|g' systemd/trestled.service.in > $(DESTDIR)$(UNITDIR)/trestled.service
 	chmod 0644 $(DESTDIR)$(UNITDIR)/trestled.service
 	$(INSTALL) -m 0644 systemd/trestle.tmpfiles $(DESTDIR)$(TMPFILESDIR)/trestle.conf

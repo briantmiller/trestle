@@ -2,6 +2,7 @@
 #ifndef TRESTLE_BRIDGE_H
 #define TRESTLE_BRIDGE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #include "../common/config.h"
@@ -10,7 +11,7 @@
 /* Create (if needed) and configure the bridge of a network; returns its
  * ifindex or -1 with err set. */
 int bridge_ensure(int nlfd, const struct tr_config *cfg, const struct tr_network *net,
-		  char *err, size_t errlen);
+		  bool *created, char *err, size_t errlen);
 
 /* Delete the bridge if trestle created it, no other network manager claims
  * it and no ports (other than the configured uplink) remain. */

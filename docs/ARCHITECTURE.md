@@ -104,6 +104,7 @@ ipam/<network>/<a.b.c.d>              lease, contains the container id
 ipam/<network>/.last                  round-robin cursor
 attachments/<network>/<container-id>  key=value record (user, uid, veth, ip, mac, aliases, mode)
 bridges/<bridge>                      trestle created this bridge
+wildcard/<network>                    network created from [network:*]: its bridge address/prefix (or "-")
 trestled.lock                         single instance lock
 state.lock                            serializes state changes between request handlers
 ```
@@ -138,6 +139,43 @@ trestle is the only allocator for the shared bridge. With
   first line the gateway, then `id ipv4 ipv6 names`). trestled starts
   aardvark-dns (through `systemd-run --scope` when available) or sends it
   SIGHUP. Status blocks then list the bridge address as DNS server.
+
+## The [network:*] catch-all
+
+A request for a network without its own section uses the `[network:*]`
+template (`netset.c`). The ACL check uses the template's `users`. When a
+container is attached, or Podman creates the network, the name is recorded
+in `wildcard/<network>` while the state lock is held, and with `subnet_pool`
+it gets the first `/subnet_prefix` of the pool that overlaps no explicit
+network and no other recorded network. The ruleset and the hosts block are
+always built from the explicit networks plus these records, so every
+request handler sees the same set; a new record triggers an nftables
+reload. Records are kept when the bridge is removed so a network name keeps
+its subnet.
+
+## Hook scripts
+
+`create_script`, `setup_script` and `teardown_script` (per network) are run
+by the request handler while it holds the state lock:
+
+| Event | When | Container data |
+|---|---|---|
+| create | Netavark `create`, and whenever trestle creates the bridge | no |
+| setup | after a successful attach (links, address, record, DNS) | yes, plus netns as fd 3 |
+| teardown | before the host veth is deleted | yes (from the attachment record) |
+
+Before running, trestled checks the script is root-owned and not writable
+by group/others (same for its directory). The child gets its own process
+group, default signal handling, `/dev/null` on stdin, a pipe on
+stdout/stderr (logged line by line, 64 KiB max), only fd 3 (netns) besides
+0-2, and an environment built from `PATH`, `LANG` and `TRESTLE_*` only.
+After `script_timeout` the process group is killed. With
+`script_on_error = fail` a failing create aborts the request and a failing
+setup is rolled back (record, veth, lease, DNS, new bridge) before the error
+is returned. Teardown failures are always only logged.
+
+The client allows for hook time when waiting for the daemon's answer
+(`request_timeout` + 30 s + the longest hook time configured).
 
 ## nftables
 

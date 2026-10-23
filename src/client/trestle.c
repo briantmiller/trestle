@@ -302,7 +302,9 @@ static void load_client_config(struct tr_config *cfg)
 		path = TRESTLE_DEFAULT_CONFIG;
 	config_defaults(cfg);
 	if (access(path, R_OK) != 0) {
-		/* config may be unreadable for unprivileged users; defaults then */
+		/* config may be unreadable for unprivileged users: use the
+		 * defaults and allow for long-running hook scripts */
+		cfg->request_timeout = 600;
 		return;
 	}
 	if (config_load(cfg, path, err, sizeof(err)) < 0) {
@@ -391,7 +393,9 @@ int main(int argc, char **argv)
 		}
 	}
 
-	int sock = connect_socket(cfg.socket_path, cfg.request_timeout + 5, err, sizeof(err));
+	/* the daemon may run hook scripts before it answers */
+	int sock = connect_socket(cfg.socket_path, cfg.request_timeout + 30 + config_max_script_time(&cfg),
+				  err, sizeof(err));
 	if (sock < 0)
 		die_mode(mode, req.cni_version, CNI_ERR_TRY_AGAIN, err);
 	if (verify_server(sock, &cfg, err, sizeof(err)) < 0)

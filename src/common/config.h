@@ -71,6 +71,24 @@ struct tr_network {
 	struct strv allow_outbound_to; /* CIDRs */
 	struct strv nft_rules;         /* raw rules appended to the network's forward chain */
 
+	/* hook scripts */
+	char create_script[PATH_MAX];
+	char setup_script[PATH_MAX];
+	char teardown_script[PATH_MAX];
+	int script_timeout;            /* seconds */
+	bool script_fail;              /* script_on_error = fail */
+
+	/* [network:*] only: every network using the catch-all section gets its
+	 * own /subnet_prefix out of subnet_pool */
+	bool has_pool;
+	uint32_t pool_addr;            /* host order, network address of the pool */
+	uint8_t pool_prefix;
+	uint8_t subnet_prefix;
+
+	bool is_wildcard;              /* this is the [network:*] template */
+	bool from_wildcard;            /* instance created from the template; its
+	                                * lists are borrowed and must not be freed */
+
 	bool seen_subnet;              /* parse bookkeeping */
 };
 
@@ -106,6 +124,10 @@ struct tr_config {
 
 	struct tr_network *nets;
 	size_t nnets;
+
+	/* [network:*]: settings for any network without its own section */
+	bool has_wildcard;
+	struct tr_network wildcard;
 };
 
 void config_defaults(struct tr_config *c);
@@ -119,6 +141,21 @@ int config_parse_text(struct tr_config *c, const char *text, const char *fname,
 int config_finalize(struct tr_config *c, char *errbuf, size_t errlen);
 void config_free(struct tr_config *c);
 
+/* Explicitly configured network (its own [network:NAME] section) or NULL. */
 const struct tr_network *config_find_network(const struct tr_config *c, const char *name);
+
+/* Expand a dnsmasq_hosts path: "%n" becomes the network name. */
+void config_expand_path(const char *tmpl, const char *network, char *out, size_t outlen);
+
+/*
+ * Make a network from the [network:*] template for `name` (no subnet yet;
+ * the daemon assigns one from subnet_pool). Returns false when there is no
+ * wildcard section. The result borrows the template's lists.
+ */
+bool config_wildcard_instance(const struct tr_config *c, const char *name, struct tr_network *out);
+
+/* Longest time one request may spend in hook scripts (used by the client
+ * to size its response timeout). */
+int config_max_script_time(const struct tr_config *c);
 
 #endif

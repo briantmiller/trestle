@@ -65,8 +65,9 @@ Remove the nftables table when the daemon stops. Default yes.
 aardvark-dns executable, its configuration directory and port. Defaults
 \fI/usr/libexec/podman/aardvark-dns\fR, \fI/run/trestle/aardvark-dns\fR, 53.
 .SH [network:NAME]
-Only networks that have a section can be used. The name must match the CNI
-\fBname\fR or the Podman network name.
+Only networks that have a section can be used, unless a \fB[network:*]\fR
+section exists (see below). The name must match the CNI \fBname\fR or the
+Podman network name.
 .TP
 .B users
 Comma separated access list: user names, \fB@\fIgroup\fR, \fB*\fR (everybody).
@@ -99,7 +100,8 @@ inside a managed block (atomic rewrite, mode/owner/SELinux label kept).
 Default no.
 .TP
 .B dnsmasq_hosts
-Write a hosts file for dnsmasq's \fBaddn-hosts\fR option.
+Write a hosts file for dnsmasq's \fBaddn-hosts\fR option. \fB%n\fR in the
+path is replaced by the network name.
 .TP
 .B dnsmasq_pid_file
 Send SIGHUP to this dnsmasq after updating the file.
@@ -137,6 +139,126 @@ Destinations containers may reach when \fBoutbound_policy = drop\fR.
 .B nft_rule
 A raw nftables rule placed first in the network's inbound and outbound
 chains. May be given several times.
+.TP
+.B create_script
+Script run when the network is created: on \fBpodman network create\fR
+(Netavark \fBcreate\fR) and whenever trestle creates the network's bridge
+(for example on the first CNI ADD, or again after the bridge was removed
+because the last container left).
+.TP
+.B setup_script
+Script run after a container or pod has been attached (veth, address,
+route, DNS entries in place).
+.TP
+.B teardown_script
+Script run when a container or pod is removed from the network, before its
+veth is deleted. A failing teardown script never stops the teardown.
+.TP
+.B script_timeout
+Seconds a script may run before it and its process group are killed.
+Default 30, maximum 600.
+.TP
+.B script_on_error
+\fBignore\fR (default): a failing script is only logged. \fBfail\fR: a
+failing create script makes the request fail, and a failing setup script
+undoes the attachment and returns the error to the runtime.
+.SH [network:*]
+The catch-all section applies to every network name that has no
+\fB[network:NAME]\fR section of its own; an explicit section always wins
+and is not merged with the catch-all. All network keys may be used, with
+these differences:
+.IP \(bu 2
+\fBbridge\fR, \fBuplink\fR and \fBsubnet\fR are not allowed: every network
+gets its own bridge \fBtbr\fR+md5(\fIname\fR), and a fixed subnet would
+overlap.
+.IP \(bu 2
+\fBsubnet_pool\fR = \fInetwork\fR/\fIprefix\fR and \fBsubnet_prefix\fR =
+\fIn\fR (default 24) give each network its own /\fIn\fR out of the pool,
+the first free one not used by any other network. The bridge gets the first
+address of it. The assignment is stored in
+\fI/var/lib/trestle/wildcard/\fIname\fR and kept, also after the bridge has
+been removed, so a network keeps its addresses. Remove that file (while no
+container uses the network) to give the subnet back. Without
+\fBsubnet_pool\fR the networks get no addresses, and features that need
+them (\fBmasquerade\fR, \fBhosts_file\fR, \fBdnsmasq_hosts\fR,
+\fBaardvark_dns\fR) are rejected.
+.IP \(bu 2
+\fBdnsmasq_hosts\fR must contain \fB%n\fR so each network has its own file.
+.PP
+\fBusers\fR of the catch-all decides who may use, and thereby create, such
+networks. \fBtrestled \-t\fR lists the networks created from it.
+.PP
+.nf
+[network:*]
+users = @containers
+subnet_pool = 10.100.0.0/16
+subnet_prefix = 24
+masquerade = yes
+firewall = yes
+.fi
+.SH HOOK SCRIPTS
+Scripts must be absolute paths to executable regular files owned by root and
+not writable by group or others, in a directory with the same restrictions;
+otherwise they are refused. They run as root, in the trestled service
+sandbox, with the event name as the first argument, standard input from
+\fI/dev/null\fR and standard output and error copied line by line to the
+trestled log. Requests on all networks wait while a script runs, so keep
+scripts short. The environment contains only \fBPATH\fR, \fBLANG\fR and
+the variables below; variables without a value are omitted.
+.TP
+.B TRESTLE_EVENT
+create, setup or teardown (also the first argument).
+.TP
+.BR TRESTLE_MODE ", " TRESTLE_COMMAND ", " TRESTLE_VERSION
+cni or netavark; the runtime command (ADD, DEL, create, setup, teardown); the
+trestle version.
+.TP
+.BR TRESTLE_NETWORK ", " TRESTLE_BRIDGE ", " TRESTLE_BRIDGE_CREATED
+Network name, bridge name, 1 if trestle created the bridge during this
+request.
+.TP
+.BR TRESTLE_SUBNET ", " TRESTLE_PREFIX ", " TRESTLE_GATEWAY ", " TRESTLE_BRIDGE_IP ", " TRESTLE_BRIDGE_IP_CIDR
+Addressing of the network (with \fBsubnet\fR).
+.TP
+.BR TRESTLE_MTU ", " TRESTLE_UPLINK
+When configured.
+.TP
+.B TRESTLE_PODMAN_NETWORK_ID
+Podman network id (create event from Netavark).
+.TP
+.BR TRESTLE_USER ", " TRESTLE_UID ", " TRESTLE_GID ", " TRESTLE_ROOTLESS
+The user running the container (from the socket credentials) and 1 when the
+client ran rootless.
+.TP
+.BR TRESTLE_CONTAINER_ID ", " TRESTLE_CONTAINER_NAME ", " TRESTLE_CONTAINER_ALIASES
+Container id, name (CNI: \fInamespace\fR-\fIpod\fR) and comma separated
+Netavark DNS aliases.
+.TP
+.BR TRESTLE_K8S_POD_NAME ", " TRESTLE_K8S_POD_NAMESPACE
+From \fBCNI_ARGS\fR.
+.TP
+.B TRESTLE_FQDN
+\fIuser\fR.\fIcontainer\fR.\fInetwork\fR.trestle
+.TP
+.BR TRESTLE_HOST_IFNAME ", " TRESTLE_CONTAINER_IFNAME
+Host side (\fBtrv\fR...) and container side interface names.
+.TP
+.BR TRESTLE_HOST_MAC ", " TRESTLE_CONTAINER_MAC
+MAC addresses of the two ends.
+.TP
+.BR TRESTLE_IP ", " TRESTLE_IP_CIDR
+The container address, when the network has a subnet.
+.TP
+.B TRESTLE_NETNS
+Network namespace path as given by the runtime. For rootless containers it
+is only valid in the caller's mount namespace.
+.TP
+.BR TRESTLE_NETNS_FD ", " TRESTLE_NETNS_FD_PATH
+setup only: the container network namespace is open as file descriptor 3,
+usable for example with \fBnsenter \-\-net=/proc/self/fd/3\fR. This works for
+rootless containers too.
+.PP
+The container and interface variables are absent for the create event.
 .SH EXAMPLE
 .nf
 [global]
@@ -156,6 +278,8 @@ allow_inbound = tcp:22, tcp:8080, icmp
 
 [network:lan]
 users = *
+setup_script = /etc/trestle/hooks/lan.sh
+teardown_script = /etc/trestle/hooks/lan.sh
 bridge = br0
 uplink = eno2
 .fi

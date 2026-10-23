@@ -61,6 +61,18 @@ If Podman does not pass static IPs for networks with IPAM driver `none`, set
 `podman_ipam = host-local` for that network. Podman then allocates the
 address and trestle rejects addresses already used by another user.
 
+## Hooks
+
+```ini
+[network:dev]
+setup_script = /etc/trestle/hooks/dev.sh
+teardown_script = /etc/trestle/hooks/dev.sh
+```
+
+`dev.sh` receives `setup`/`teardown` as `$1` and variables such as
+`TRESTLE_CONTAINER_NAME`, `TRESTLE_USER`, `TRESTLE_HOST_IFNAME`,
+`TRESTLE_IP`. See `hook-example.sh` next to this file.
+
 ## Troubleshooting
 
 ```sh

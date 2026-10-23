@@ -17,6 +17,7 @@
 
 #include "../common/log.h"
 #include "../common/naming.h"
+#include "netset.h"
 #include "state.h"
 
 /* ---- /etc/hosts -------------------------------------------------------- */
@@ -134,14 +135,17 @@ int hosts_refresh_all(const struct tr_config *cfg)
 	struct buf block = { 0 };
 	bool any = false;
 
-	for (size_t i = 0; i < cfg->nnets; i++) {
-		const struct tr_network *n = &cfg->nets[i];
+	struct netset ns;
+	netset_load(cfg, &ns);   /* explicit networks and [network:*] instances */
+	for (size_t i = 0; i < ns.n; i++) {
+		const struct tr_network *n = ns.all[i];
 		if (!n->hosts_file)
 			continue;
 		any = true;
 		struct collect_ctx c = { .net = n, .hosts = &block };
 		state_foreach(cfg->state_dir, n->name, collect_cb, &c);
 	}
+	netset_free(&ns);
 
 	char *orig = tr_read_file(cfg->hosts_path, 16 * 1024 * 1024, NULL);
 	if (!orig) {
@@ -195,9 +199,11 @@ static void dnsmasq_refresh(const struct tr_config *cfg, const struct tr_network
 	struct collect_ctx c = { .net = net, .hosts = &b };
 	buf_printf(&b, "# trestle network %s - generated, do not edit\n", net->name);
 	state_foreach(cfg->state_dir, net->name, collect_cb, &c);
-	int r = write_like_original(net->dnsmasq_hosts, b.p, b.len, 0644);
+	char path[PATH_MAX];
+	config_expand_path(net->dnsmasq_hosts, net->name, path, sizeof(path));
+	int r = write_like_original(path, b.p, b.len, 0644);
 	if (r)
-		log_err("cannot write %s: %s", net->dnsmasq_hosts, strerror(-r));
+		log_err("cannot write %s: %s", path, strerror(-r));
 	else if (net->dnsmasq_pid_file[0])
 		signal_pidfile(net->dnsmasq_pid_file, "dnsmasq");
 	buf_free(&b);

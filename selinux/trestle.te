@@ -26,6 +26,10 @@ files_type(trestle_var_run_t)
 type trestle_tmp_t;
 files_tmp_file(trestle_tmp_t)
 
+# hook scripts (/etc/trestle/hooks); they run in trestled_t
+type trestle_script_exec_t;
+files_type(trestle_script_exec_t)
+
 ########################################
 #
 # trestled local policy
@@ -85,8 +89,14 @@ kernel_read_system_state(trestled_t)
 kernel_read_network_state(trestled_t)
 kernel_rw_net_sysctls(trestled_t)
 
-# aardvark-dns started in our domain when it is labeled bin_t
+# hook scripts and the tools they typically call (ip, tc, nsenter, logger)
+can_exec(trestled_t, trestle_script_exec_t)
+allow trestled_t trestle_script_exec_t:dir list_dir_perms;
+corecmd_exec_shell(trestled_t)
 corecmd_exec_bin(trestled_t)
+allow trestled_t self:process { setpgid };
+
+# aardvark-dns started in our domain when it is labeled bin_t
 corenet_tcp_bind_generic_node(trestled_t)
 corenet_udp_bind_generic_node(trestled_t)
 corenet_tcp_bind_dns_port(trestled_t)

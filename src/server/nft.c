@@ -14,6 +14,7 @@
 #include <unistd.h>
 
 #include "../common/log.h"
+#include "netset.h"
 
 static void chain_id(const char *bridge, char *out, size_t len)
 {
@@ -44,21 +45,25 @@ static bool net_needs_rules(const struct tr_network *n)
 
 bool nft_build_ruleset(const struct tr_config *cfg, struct buf *b)
 {
+	struct netset ns;
+	netset_load(cfg, &ns);   /* explicit networks and [network:*] instances */
 	bool any = false, any_masq = false;
-	for (size_t i = 0; i < cfg->nnets; i++) {
-		any |= net_needs_rules(&cfg->nets[i]);
-		any_masq |= cfg->nets[i].masquerade;
+	for (size_t i = 0; i < ns.n; i++) {
+		any |= net_needs_rules(ns.all[i]);
+		any_masq |= ns.all[i]->masquerade;
 	}
-	if (!any)
+	if (!any) {
+		netset_free(&ns);
 		return false;
+	}
 
 	const char *t = cfg->nft_table;
 	/* "add then delete" makes the replace idempotent and atomic in one transaction */
 	buf_printf(b, "table inet %s\ndelete table inet %s\n", t, t);
 	buf_printf(b, "table inet %s {\n", t);
 
-	for (size_t i = 0; i < cfg->nnets; i++) {
-		const struct tr_network *n = &cfg->nets[i];
+	for (size_t i = 0; i < ns.n; i++) {
+		const struct tr_network *n = ns.all[i];
 		char id[TR_IFNAMSIZ + 4];
 		if (!n->firewall)
 			continue;
@@ -85,12 +90,12 @@ bool nft_build_ruleset(const struct tr_config *cfg, struct buf *b)
 
 	buf_printf(b, "\tchain forward {\n\t\ttype filter hook forward priority filter; policy accept;\n");
 	bool any_fw = false;
-	for (size_t i = 0; i < cfg->nnets; i++)
-		any_fw |= cfg->nets[i].firewall;
+	for (size_t i = 0; i < ns.n; i++)
+		any_fw |= ns.all[i]->firewall;
 	if (any_fw)
 		buf_printf(b, "\t\tct state established,related accept\n\t\tct state invalid drop\n");
-	for (size_t i = 0; i < cfg->nnets; i++) {
-		const struct tr_network *n = &cfg->nets[i];
+	for (size_t i = 0; i < ns.n; i++) {
+		const struct tr_network *n = ns.all[i];
 		char id[TR_IFNAMSIZ + 4];
 		if (!n->firewall)
 			continue;
@@ -102,8 +107,8 @@ bool nft_build_ruleset(const struct tr_config *cfg, struct buf *b)
 
 	if (any_masq) {
 		buf_printf(b, "\tchain postrouting {\n\t\ttype nat hook postrouting priority srcnat; policy accept;\n");
-		for (size_t i = 0; i < cfg->nnets; i++) {
-			const struct tr_network *n = &cfg->nets[i];
+		for (size_t i = 0; i < ns.n; i++) {
+			const struct tr_network *n = ns.all[i];
 			char net[16];
 			if (!n->masquerade)
 				continue;
@@ -113,6 +118,7 @@ bool nft_build_ruleset(const struct tr_config *cfg, struct buf *b)
 		buf_printf(b, "\t}\n");
 	}
 	buf_printf(b, "}\n");
+	netset_free(&ns);
 	return true;
 }
 

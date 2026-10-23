@@ -228,6 +228,10 @@ int tr_parse_cni(tr_env_fn getenv_fn, void *ctx, const char *stdin_text,
 	cni_args_get(args, "K8S_POD_NAMESPACE", ns, sizeof(ns));
 	cni_args_get(args, "IP", ip, sizeof(ip));
 	cni_args_get(args, "MAC", mac, sizeof(mac));
+	if (pod[0] && tr_valid_container_name(pod))
+		tr_strlcpy(out->k8s_pod_name, pod, sizeof(out->k8s_pod_name));
+	if (ns[0] && tr_valid_container_name(ns))
+		tr_strlcpy(out->k8s_pod_namespace, ns, sizeof(out->k8s_pod_namespace));
 	if (pod[0] && ns[0])
 		snprintf(out->container_name, sizeof(out->container_name), "%s-%s", ns, pod);
 	else if (pod[0])

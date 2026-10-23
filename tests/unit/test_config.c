@@ -145,6 +145,64 @@ static void test_confd_override(void)
 	t_rmrf(dir);
 }
 
+static void test_wildcard(void)
+{
+	struct tr_config c;
+	char err[512] = "";
+	CHECK(parse(&c,
+		"[network:lab]\nusers = alice\nsubnet = 10.100.0.1/24\n"
+		"[network:*]\nusers = @everyone, !mallory\nsubnet_pool = 10.100.0.0/16\nsubnet_prefix = 24\n"
+		"masquerade = yes\nhosts_file = yes\ndnsmasq_hosts = /etc/dnsmasq.d/trestle-%n.hosts\n"
+		"setup_script = /etc/trestle/hooks/any.sh\nscript_timeout = 50\n",
+		err, sizeof(err)) == 0);
+	if (err[0])
+		fprintf(stderr, "    err: %s\n", err);
+	CHECK(c.nnets == 1);                       /* the wildcard is not a regular network */
+	CHECK(c.has_wildcard && c.wildcard.has_pool && c.wildcard.subnet_prefix == 24);
+	CHECK(config_find_network(&c, "*") == NULL);
+	CHECK(config_find_network(&c, "lab") != NULL);
+	CHECK(config_max_script_time(&c) == 50);
+
+	struct tr_network n;
+	CHECK(config_wildcard_instance(&c, "team-a", &n));
+	CHECK_STR(n.name, "team-a");
+	CHECK(!strncmp(n.bridge, "tbr", 3) && strlen(n.bridge) == 15);
+	CHECK(n.from_wildcard && !n.is_wildcard && !n.has_subnet);
+	CHECK(n.users.n == 2 && n.masquerade);    /* settings inherited */
+	char path[256];
+	config_expand_path(n.dnsmasq_hosts, n.name, path, sizeof(path));
+	CHECK_STR(path, "/etc/dnsmasq.d/trestle-team-a.hosts");
+	config_free(&c);
+
+	/* without a catch-all there is no instance */
+	CHECK(parse(&c, "[network:lab]\nusers = alice\n", err, sizeof(err)) == 0);
+	CHECK(!config_wildcard_instance(&c, "x", &n));
+	config_free(&c);
+
+	/* quoted form and a pool-less catch-all are fine */
+	CHECK(parse(&c, "[network \"*\"]\nusers = *\nstp = yes\n", err, sizeof(err)) == 0);
+	CHECK(c.has_wildcard && c.wildcard.stp && !c.wildcard.has_pool);
+	config_free(&c);
+
+	struct { const char *text, *expect; } bad[] = {
+		{ "[network:*]\nusers=*\nbridge = br0\n", "'bridge' is not allowed" },
+		{ "[network:*]\nusers=*\nuplink = eth1\n", "'uplink' is not allowed" },
+		{ "[network:*]\nusers=*\nsubnet = 10.0.0.1/24\n", "use subnet_pool" },
+		{ "[network:lab]\nsubnet_pool = 10.0.0.0/16\n", "only valid in [network:*]" },
+		{ "[network:lab]\nsubnet_prefix = 24\n", "only valid in [network:*]" },
+		{ "[network:*]\nsubnet_pool = 10.0.0.1/16\n", "network address" },
+		{ "[network:*]\nusers=*\nsubnet_pool = 10.0.0.0/24\nsubnet_prefix = 16\n", "larger than" },
+		{ "[network:*]\nusers=*\nsubnet_pool = 10.0.0.0/16\ndnsmasq_hosts = /tmp/x.hosts\n", "%n" },
+		{ "[network:*]\nusers=*\nmasquerade = yes\n", "requires subnet" },
+	};
+	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+		err[0] = 0;
+		CHECK(parse(&c, bad[i].text, err, sizeof(err)) < 0);
+		CHECK_CONTAINS(err, bad[i].expect);
+		config_free(&c);
+	}
+}
+
 int main(void)
 {
 	tlog_init("test", TLOG_STDERR, LOG_ERR);
@@ -152,5 +210,6 @@ int main(void)
 	RUN(test_full);
 	RUN(test_errors);
 	RUN(test_confd_override);
+	RUN(test_wildcard);
 	TEST_MAIN_END();
 }

@@ -41,6 +41,19 @@ Because `/tmp` is world writable:
 A user could still create `/tmp/trestle.sock` while trestled is stopped. The
 client's server verification then refuses to talk to it.
 
+## Hook scripts
+
+Hook scripts run as root with data that partly comes from unprivileged
+users (container names, aliases, Kubernetes pod names). trestle only passes
+values that passed its strict name checks (letters, digits, `_`, `.`, `-`),
+never through a shell, and only as environment variables; scripts must
+still quote them (`"$TRESTLE_CONTAINER_NAME"`). Scripts and their directory
+must be root-owned and not group/world writable, or trestled refuses to run
+them. Scripts inherit the systemd sandbox of trestled (`ProtectHome`,
+`ProtectSystem=full`, `MemoryDenyWriteExecute`, ...), and with SELinux they
+run in `trestled_t`; label them `trestle_script_exec_t` (default for
+`/etc/trestle/hooks`).
+
 ## Hardening
 
 * systemd unit: limited capability bounding set, `NoNewPrivileges`,

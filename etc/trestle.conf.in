@@ -46,7 +46,17 @@
 #aardvark_port = 53
 
 
-# One section per network. Only networks listed here can be used.
+# One section per network. Only networks listed here can be used, unless
+# there is a [network:*] section: it applies to every network name without
+# a section of its own. In [network:*] use subnet_pool/subnet_prefix
+# instead of subnet (each network gets its own subnet out of the pool);
+# bridge and uplink are not allowed there. See trestle.conf(5).
+#
+#[network:*]
+#users = @containers
+#subnet_pool = 10.100.0.0/16
+#subnet_prefix = 24
+#masquerade = yes
 #
 #[network:lab]
 # Who may use the network: user names, @groups, * for everybody.
@@ -85,3 +95,14 @@
 #allow_inbound_from = 192.168.1.0/24
 #allow_outbound_to = 10.20.0.0/16
 #nft_rule = ip daddr 169.254.169.254 drop
+#
+# Hook scripts (root-owned, not writable by group/others). They get the
+# event as $1 and TRESTLE_* environment variables: network, bridge,
+# container id/name, user, host/container interface names, IP address...
+# See "HOOK SCRIPTS" in trestle.conf(5).
+#create_script = /etc/trestle/hooks/lab.sh
+#setup_script = /etc/trestle/hooks/lab.sh
+#teardown_script = /etc/trestle/hooks/lab.sh
+#script_timeout = 30
+# ignore = only log failures; fail = a failing create/setup aborts the request
+#script_on_error = ignore

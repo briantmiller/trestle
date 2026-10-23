@@ -15,6 +15,7 @@
 #include "server/bridge.h"
 #include "server/checks.h"
 #include "server/dnsout.h"
+#include "server/netset.h"
 #include "server/nft.h"
 #include "server/state.h"
 
@@ -286,6 +287,74 @@ static void test_acl(void)
 	strv_clear(&l);
 }
 
+static void test_netset(void)
+{
+	char *dir = t_tmpdir(), err[256] = "", text[1024], gw[16];
+	struct tr_config c;
+	config_defaults(&c);
+	snprintf(text, sizeof(text),
+		 "[global]\nstate_dir = %s\n"
+		 "[network:lab]\nusers=*\nsubnet=10.100.0.1/24\n"
+		 "[network:*]\nusers=*\nsubnet_pool=10.100.0.0/22\nsubnet_prefix=24\nmasquerade=yes\n", dir);
+	CHECK(config_parse_text(&c, text, "t", err, sizeof(err)) == 0);
+	CHECK(config_finalize(&c, err, sizeof(err)) == 0);
+
+	struct tr_network st;
+	const struct tr_network *n = NULL;
+	bool created = false;
+
+	/* explicit section wins */
+	CHECK(net_resolve(&c, "lab", true, &st, &n, &created, err, sizeof(err)) == 0);
+	CHECK(n == &c.nets[0] && !created);
+
+	/* lookup without materializing: template, no subnet yet */
+	CHECK(net_resolve(&c, "a", false, &st, &n, &created, err, sizeof(err)) == 0);
+	CHECK(n == &st && n->from_wildcard && !n->has_subnet && !created);
+
+	/* first use: next free /24 after the explicit network's subnet */
+	CHECK(net_resolve(&c, "a", true, &st, &n, &created, err, sizeof(err)) == 0);
+	CHECK(created && n->has_subnet);
+	tr_fmt_ipv4(n->gateway, gw);
+	CHECK_STR(gw, "10.100.1.1");
+	CHECK(n->prefix == 24 && n->netaddr == 0x0a640100 && n->broadcast == 0x0a6401ff);
+	CHECK(net_resolve(&c, "b", true, &st, &n, &created, err, sizeof(err)) == 0);
+	tr_fmt_ipv4(n->gateway, gw);
+	CHECK_STR(gw, "10.100.2.1");
+
+	/* stable: asking again gives the recorded subnet */
+	CHECK(net_resolve(&c, "a", true, &st, &n, &created, err, sizeof(err)) == 0);
+	tr_fmt_ipv4(n->gateway, gw);
+	CHECK_STR(gw, "10.100.1.1");
+	CHECK(!created);
+
+	/* netset sees the explicit network and both instances */
+	struct netset ns;
+	netset_load(&c, &ns);
+	CHECK(ns.n == 3 && ns.ninst == 2);
+	netset_free(&ns);
+
+	/* nftables includes masquerade for instances */
+	struct buf b = { 0 };
+	CHECK(nft_build_ruleset(&c, &b));
+	CHECK_CONTAINS(b.p, "ip saddr 10.100.1.0/24");
+	CHECK_CONTAINS(b.p, "ip saddr 10.100.2.0/24");
+	buf_free(&b);
+
+	/* pool exhaustion: one /24 left (.3), then none */
+	CHECK(net_resolve(&c, "c", true, &st, &n, &created, err, sizeof(err)) == 0);
+	CHECK(net_resolve(&c, "d", true, &st, &n, &created, err, sizeof(err)) < 0);
+	CHECK_CONTAINS(err, "no free /24");
+	config_free(&c);
+
+	/* no catch-all: unknown networks are not permitted */
+	config_defaults(&c);
+	CHECK(config_parse_text(&c, "[network:lab]\nusers=*\n", "t", err, sizeof(err)) == 0);
+	CHECK(config_finalize(&c, err, sizeof(err)) == 0);
+	CHECK(net_resolve(&c, "zzz", true, &st, &n, &created, err, sizeof(err)) == 1);
+	config_free(&c);
+	t_rmrf(dir);
+}
+
 int main(void)
 {
 	tlog_init("test", TLOG_STDERR, LOG_ERR);
@@ -296,5 +365,6 @@ int main(void)
 	RUN(test_foreign_manager);
 	RUN(test_proto);
 	RUN(test_acl);
+	RUN(test_netset);
 	TEST_MAIN_END();
 }

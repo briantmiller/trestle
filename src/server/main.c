@@ -25,6 +25,7 @@
 #include "../common/log.h"
 #include "dnsout.h"
 #include "handler.h"
+#include "netset.h"
 #include "nft.h"
 
 #ifndef TRESTLE_VERSION
@@ -250,9 +251,30 @@ int main(int argc, char **argv)
 		tlog_set_level(cfg.log_level);
 	if (test) {
 		struct buf b = { 0 };
-		printf("configuration OK: %zu network(s)\n", cfg.nnets);
+		printf("configuration OK: %zu network(s)%s\n", cfg.nnets, cfg.has_wildcard ? " + [network:*]" : "");
 		for (size_t i = 0; i < cfg.nnets; i++)
 			printf("  %-20s bridge %s\n", cfg.nets[i].name, cfg.nets[i].bridge);
+		if (cfg.has_wildcard) {
+			const struct tr_network *w = &cfg.wildcard;
+			char pool[16];
+			tr_fmt_ipv4(w->pool_addr, pool);
+			printf("  %-20s any other network name; bridge tbr<md5>", "*");
+			if (w->has_pool)
+				printf(", one /%u per network from %s/%u", w->subnet_prefix, pool, w->pool_prefix);
+			else
+				printf(", no addressing");
+			printf("\n");
+			struct netset ns;
+			netset_load(&cfg, &ns);
+			for (size_t i = 0; i < ns.ninst; i++) {
+				char gw[16] = "-";
+				if (ns.inst[i].has_subnet)
+					tr_fmt_ipv4(ns.inst[i].gateway, gw);
+				printf("    %-18s bridge %s subnet %s/%u (from [network:*])\n", ns.inst[i].name,
+				       ns.inst[i].bridge, gw, ns.inst[i].has_subnet ? ns.inst[i].prefix : 0);
+			}
+			netset_free(&ns);
+		}
 		if (nft_build_ruleset(&cfg, &b))
 			printf("\nnftables ruleset:\n%s", b.p);
 		buf_free(&b);

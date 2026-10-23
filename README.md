@@ -32,8 +32,11 @@ The same plugin also works as a regular CNI plugin for Kubernetes
 1. **Who is calling?** uid/pid from `SO_PEERCRED`, user name from passwd.
 2. **Is it the real client?** `/proc/<pid>/exe` must be the configured
    `client_binary`.
-3. **Is the network permitted?** It needs a `[network:NAME]` section and the
-   user must match its `users` list (`alice`, `@group`, `*`, `!deny`).
+3. **Is the network permitted?** It needs a `[network:NAME]` section, or
+   falls back to the `[network:*]` catch-all section, and the user must
+   match its `users` list (`alice`, `@group`, `*`, `!deny`). Networks from
+   the catch-all each get their own bridge and a subnet from its
+   `subnet_pool`.
 4. **Bridge.** `tbr` + first 12 hex chars of `md5(network)`, or the
    configured `bridge`. Created if missing; existing bridges are reused.
 5. **veth.** Host side `trv` + first 12 hex chars of
@@ -46,6 +49,12 @@ The same plugin also works as a regular CNI plugin for Kubernetes
    `10.0.0.2-254` for containers, default route via the bridge.
 7. **Names** (optional): `user.container.network.trestle` in `/etc/hosts`,
    a dnsmasq hosts file, and/or aardvark-dns for Netavark.
+
+8. **Hooks** (optional): per-network `create_script`, `setup_script` and
+   `teardown_script` run with `TRESTLE_*` environment variables (network,
+   bridge, container id/name, user, interface names, MACs, IP, and the
+   container netns as fd 3). See `man trestle.conf` and
+   `docs/examples/hook-example.sh`.
 
 Teardown reverses all of this. A bridge is removed only if trestle created
 it, it has no other ports, and NetworkManager, systemd-networkd and libvirt

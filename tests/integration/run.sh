@@ -88,11 +88,47 @@ aardvark_dns = yes
 firewall = yes
 masquerade = yes
 allow_inbound = tcp:80, icmp
+create_script = $IT/hooks/hook.sh
+setup_script = $IT/hooks/hook.sh
+teardown_script = $IT/hooks/hook.sh
+script_timeout = 10
+
+[network:itfail]
+users = root
+subnet = 10.232.0.1/24
+setup_script = $IT/hooks/fail.sh
+teardown_script = $IT/hooks/fail.sh
+script_on_error = fail
+
+[network:*]
+users = root, $U1
+subnet_pool = 10.240.0.0/16
+subnet_prefix = 24
+hosts_file = yes
+firewall = yes
+masquerade = yes
 EOF
 # a wrapped daemon (valgrind) is a different binary, so skip that check
 if [ -n "${TRESTLE_IT_WRAPPER:-}" ]; then sed -i "s|^\[global\]|[global]\nverify_server = no|" "$IT/trestle.conf"; fi
 chmod 644 "$IT/trestle.conf"
 export TRESTLE_CONFIG=$IT/trestle.conf
+
+# hook scripts: record their environment, and look inside the container
+# network namespace through the fd they receive
+mkdir -p "$IT/hooks/out"
+chmod 755 "$IT/hooks"
+cat > "$IT/hooks/hook.sh" <<EOF
+#!/bin/sh
+f=$IT/hooks/out/\$1-\${TRESTLE_CONTAINER_ID:-network}.env
+env | sort > "\$f"
+if [ "\$1" = setup ] && [ -n "\$TRESTLE_NETNS_FD" ]; then
+	nsenter --net=/proc/self/fd/\$TRESTLE_NETNS_FD ip -4 -o addr show dev "\$TRESTLE_CONTAINER_IFNAME" >> "\$f" 2>&1
+fi
+echo "hook \$1 done for \$TRESTLE_NETWORK"
+EOF
+printf '#!/bin/sh\necho "refusing $TRESTLE_CONTAINER_NAME" >&2\nexit 7\n' > "$IT/hooks/fail.sh"
+chmod 755 "$IT/hooks/hook.sh" "$IT/hooks/fail.sh"
+HO=$IT/hooks/out
 
 # a stale file at the socket path must be removed by the server
 touch "$IT/trestle.sock"
@@ -120,7 +156,24 @@ say "CNI (root, Kubernetes style)"
 ip netns add trit1; ip netns add trit2; ip netns add trit3
 out=$(cni ADD pod1 /var/run/netns/trit1 eth0 "K8S_POD_NAMESPACE=default;K8S_POD_NAME=web")
 contains "ADD returns CNI result" "$out" '"ips":[{"address":"10.231.0.2/24","gateway":"10.231.0.1","interface":1}]'
+contains "create hook ran when the bridge was created" "$(cat $HO/create-network.env 2>/dev/null)" "TRESTLE_BRIDGE_CREATED=1"
+contains "create hook got bridge name" "$(cat $HO/create-network.env 2>/dev/null)" "TRESTLE_BRIDGE=tbr"
+SE=$(cat $HO/setup-pod1.env 2>/dev/null)
+contains "setup hook: network" "$SE" "TRESTLE_NETWORK=itnet"
+contains "setup hook: container id" "$SE" "TRESTLE_CONTAINER_ID=pod1"
+contains "setup hook: container name" "$SE" "TRESTLE_CONTAINER_NAME=default-web"
+contains "setup hook: k8s pod" "$SE" "TRESTLE_K8S_POD_NAME=web"
+contains "setup hook: k8s namespace" "$SE" "TRESTLE_K8S_POD_NAMESPACE=default"
+contains "setup hook: user" "$SE" "TRESTLE_USER=root"
+contains "setup hook: ip" "$SE" "TRESTLE_IP_CIDR=10.231.0.2/24"
+contains "setup hook: gateway" "$SE" "TRESTLE_GATEWAY=10.231.0.1"
+contains "setup hook: container ifname" "$SE" "TRESTLE_CONTAINER_IFNAME=eth0"
+contains "setup hook: mode" "$SE" "TRESTLE_MODE=cni"
+contains "setup hook: fqdn" "$SE" "TRESTLE_FQDN=root.default-web.itnet.trestle"
+contains "setup hook can enter container netns via fd" "$SE" "inet 10.231.0.2/24"
+contains "hook output logged" "$(cat $IT/server.log)" "setup_script[itnet]: hook setup done for itnet"
 VETH=trv$(printf 'itnet:root:default-web' | md5sum | cut -c1-12)
+contains "setup hook: host ifname" "$(cat $HO/setup-pod1.env 2>/dev/null)" "TRESTLE_HOST_IFNAME=$VETH"
 contains "host veth named trv+md5(network:user:container)" "$out" "\"name\":\"$VETH\""
 check "bridge $BR exists" ip link show "$BR"
 contains "bridge address" "$(ip -4 addr show "$BR")" "10.231.0.1/24"
@@ -138,10 +191,18 @@ out=$(cni ADD pod4 /var/run/netns/trit3 eth0 "K8S_POD_NAMESPACE=default;K8S_POD_
 contains "veth name collision rejected" "$out" "already exists"
 out=$(cni ADD pod5 /proc/self/ns/net eth5 "K8S_POD_NAME=evil")
 contains "host netns rejected" "$out" "host network namespace"
-out=$(cni ADD pod6 /var/run/netns/trit3 eth0 "" '{"cniVersion":"1.0.0","name":"other","type":"trestle"}')
-contains "unconfigured network rejected" "$out" "not permitted by trestle"
 out=$(cni ADD pod6 /var/run/netns/trit3 eth0 "" '{"cniVersion":"1.0.0","name":"itnet"')
 contains "invalid JSON rejected by client" "$out" '"code":6'
+
+FAILNET='{"cniVersion":"1.0.0","name":"itfail","type":"trestle"}'
+out=$(cni ADD failpod /var/run/netns/trit3 eth3 "K8S_POD_NAME=nope" "$FAILNET")
+contains "failing setup hook rejects ADD (script_on_error=fail)" "$out" "exited with status 7"
+contains "failing hook stderr logged" "$(cat $IT/server.log)" "refusing nope"
+check "failed ADD rolled back the veth" bash -c "! ip netns exec trit3 ip link show eth3"
+check "failed ADD released the lease" bash -c "[ -z \"\$(ls $IT/state/ipam/itfail 2>/dev/null)\" ]"
+check "failed ADD removed the new bridge" bash -c "! ip link show tbr$(printf itfail | md5sum | cut -c1-12)"
+out=$(cni DEL failpod /var/run/netns/trit3 eth3 "K8S_POD_NAME=nope" "$FAILNET"; echo "rc=$?")
+contains "failing teardown hook never blocks DEL" "$out" "rc=0"
 
 if command -v ping >/dev/null; then
 	check "container -> bridge ping" ip netns exec trit1 ping -c1 -W2 10.231.0.1
@@ -221,8 +282,19 @@ for _ in $(seq 30); do [ -s "$IT/hups" ] && break; sleep 0.1; done
 check "aardvark-dns got SIGHUP on update" test -s "$IT/hups"
 contains "hosts has rootless entry" "$(cat "$IT/hosts")" "$U1.webapp.itnet.trestle"
 
+RE=$(cat $HO/setup-aaaa1111.env 2>/dev/null)
+contains "rootless setup hook: user" "$RE" "TRESTLE_USER=$U1"
+contains "rootless setup hook: rootless flag" "$RE" "TRESTLE_ROOTLESS=1"
+contains "rootless setup hook: aliases" "$RE" "TRESTLE_CONTAINER_ALIASES=webapp-alias"
+contains "rootless setup hook: mode" "$RE" "TRESTLE_MODE=netavark"
+contains "rootless setup hook enters the user's netns via fd" "$RE" "inet 10.231.0."
 out=$(rootless $U1 "$IT/a.json" teardown)
 contains "user A teardown" "$out" "rc=0"
+TE=$(cat $HO/teardown-aaaa1111.env 2>/dev/null)
+contains "teardown hook: event" "$TE" "TRESTLE_EVENT=teardown"
+contains "teardown hook: host ifname" "$TE" "TRESTLE_HOST_IFNAME=trv"
+contains "teardown hook: ip" "$TE" "TRESTLE_IP=10.231.0."
+contains "teardown hook: container name" "$TE" "TRESTLE_CONTAINER_NAME=webapp"
 out=$(rootless $U2 "$IT/b.json" teardown)
 contains "user B teardown" "$out" "rc=0"
 if grep -q aaaa1111 "$AFILE" 2>/dev/null; then bad "aardvark entry removed"; else ok "aardvark entry removed"; fi
@@ -230,6 +302,8 @@ if grep -q "$U1" "$IT/hosts"; then bad "hosts entry removed"; else ok "hosts ent
 
 out=$(echo '{"name":"itnet","id":"abc","driver":"trestle","network_interface":"","subnets":[],"ipv6_enabled":false,"internal":false,"dns_enabled":false,"ipam_options":{"driver":"host-local"},"options":{}}' > "$IT/create.json"; chmod 644 "$IT/create.json"; su $U1 -s /bin/sh -c "TRESTLE_CONFIG=$IT/trestle.conf $IT/bin/trestle create < $IT/create.json")
 contains "create fills bridge name" "$out" "\"network_interface\":\"$BR\""
+contains "netavark create hook: podman network id" "$(cat $HO/create-network.env)" "TRESTLE_PODMAN_NETWORK_ID=abc"
+contains "netavark create hook: user" "$(cat $HO/create-network.env)" "TRESTLE_USER=$U1"
 contains "create sets ipam none" "$out" '"ipam_options":{"driver":"none"}'
 out=$(echo '{"name":"itnet","id":"abc","driver":"trestle","subnets":[{"subnet":"192.168.0.0/24"}]}' | "$IT/bin/trestle" create)
 contains "create rejects conflicting subnet" "$out" "conflicts with the trestle subnet"
@@ -257,7 +331,43 @@ pkill -f "$IT/fakeserver.py"
 fi
 
 # ---------------------------------------------------------------- reload
+say "[network:*] catch-all"
+WNS='{"cniVersion":"1.0.0","name":"wild1","type":"trestle"}'
+WBR=tbr$(printf wild1 | md5sum | cut -c1-12)
+out=$(cni ADD w1 /var/run/netns/trit3 ew1 "K8S_POD_NAME=w1" "$WNS")
+contains "unconfigured network accepted through [network:*]" "$out" '"address":"10.240.0.2/24","gateway":"10.240.0.1"'
+check "catch-all network got its own bridge" ip link show "$WBR"
+contains "bridge has the first pool subnet" "$(ip -4 addr show $WBR)" "10.240.0.1/24"
+contains "nftables masquerade for the new subnet" "$(nft list table inet trestleit)" "ip saddr 10.240.0.0/24"
+contains "hosts entry for catch-all network" "$(cat $IT/hosts)" "root.w1.wild1.trestle"
+out=$(cni ADD w2 /var/run/netns/trit3 ew2 "K8S_POD_NAME=w2" '{"cniVersion":"1.0.0","name":"wild2","type":"trestle"}')
+contains "second catch-all network gets the next /24" "$out" '"address":"10.240.1.2/24"'
+out=$("$IT/bin/trestled" -t -c "$IT/trestle.conf")
+contains "trestled -t lists catch-all networks" "$out" "wild2"
+cat > "$IT/w3.json" <<EOF
+{"container_id":"cccc3333","container_name":"wapp","port_mappings":[],
+ "network":{"driver":"trestle","id":"n3","name":"wild3","subnets":[]},
+ "network_options":{"interface_name":"eth0"}}
+EOF
+chmod 644 "$IT/w3.json"
+out=$(rootless $U1 "$IT/w3.json" setup)
+contains "rootless user allowed by [network:*] users" "$out" '"ipnet":"10.240.2.2/24"'
+out=$(rootless $U3 "$IT/w3.json" setup)
+contains "user not in [network:*] users is denied" "$out" "is not permitted to use network 'wild3'"
+rootless $U1 "$IT/w3.json" teardown >/dev/null
+out=$(cni ADD w4 /var/run/netns/trit3 ew4 "K8S_POD_NAME=w4" '{"cniVersion":"1.0.0","name":"itnet","type":"trestle"}')
+contains "explicit section still wins over [network:*]" "$out" '"gateway":"10.231.0.1"'
+cni DEL w4 /var/run/netns/trit3 ew4 "K8S_POD_NAME=w4" '{"cniVersion":"1.0.0","name":"itnet","type":"trestle"}' >/dev/null
+cni DEL w1 /var/run/netns/trit3 ew1 "K8S_POD_NAME=w1" "$WNS" >/dev/null
+cni DEL w2 /var/run/netns/trit3 ew2 "K8S_POD_NAME=w2" '{"cniVersion":"1.0.0","name":"wild2","type":"trestle"}' >/dev/null
+check "catch-all bridge removed after last container" bash -c "! ip link show $WBR"
+out=$(cni ADD w1 /var/run/netns/trit3 ew1 "K8S_POD_NAME=w1" "$WNS")
+contains "network keeps its subnet after the bridge was removed" "$out" '"gateway":"10.240.0.1"'
+cni DEL w1 /var/run/netns/trit3 ew1 "K8S_POD_NAME=w1" "$WNS" >/dev/null
+
 say "reload"
+# drop the catch-all: unconfigured networks must be refused again
+sed -i '/^\[network:\*\]/,$d' "$IT/trestle.conf"
 cat >> "$IT/trestle.conf" <<EOF
 
 [network:itnet2]
@@ -268,6 +378,8 @@ kill -HUP $SERVER_PID; sleep 1.5
 out=$(cni ADD pod9 /var/run/netns/trit3 eth1 "K8S_POD_NAME=late" '{"cniVersion":"1.0.0","name":"itnet2","type":"trestle"}')
 contains "network added by SIGHUP reload is usable" "$out" '"name":"eth1"'
 contains "network without subnet returns no ips" "$out" '"dns":{}'
+out=$(cni ADD pod6 /var/run/netns/trit3 eth0 "" '{"cniVersion":"1.0.0","name":"other","type":"trestle"}')
+contains "unconfigured network rejected without [network:*]" "$out" "not permitted by trestle"
 cni DEL pod9 /var/run/netns/trit3 eth1 "K8S_POD_NAME=late" '{"cniVersion":"1.0.0","name":"itnet2","type":"trestle"}' >/dev/null
 check "trestle-created configured bridge removed when empty" bash -c "! ip link show trit-br0"
 

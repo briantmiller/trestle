@@ -68,6 +68,54 @@ void config_free(struct tr_config *c)
 	free(c->nets);
 	c->nets = NULL;
 	c->nnets = 0;
+	if (c->has_wildcard)
+		network_free(&c->wildcard);
+	c->has_wildcard = false;
+}
+
+void config_expand_path(const char *tmpl, const char *network, char *out, size_t outlen)
+{
+	size_t o = 0;
+	for (const char *p = tmpl; *p && o + 1 < outlen; p++) {
+		if (p[0] == '%' && p[1] == 'n') {
+			for (const char *q = network; *q && o + 1 < outlen; q++)
+				out[o++] = *q;
+			p++;
+		} else {
+			out[o++] = *p;
+		}
+	}
+	out[o] = '\0';
+}
+
+bool config_wildcard_instance(const struct tr_config *c, const char *name, struct tr_network *out)
+{
+	if (!c->has_wildcard)
+		return false;
+	*out = c->wildcard;               /* shallow copy: lists are borrowed */
+	out->is_wildcard = false;
+	out->from_wildcard = true;
+	tr_strlcpy(out->name, name, sizeof(out->name));
+	tr_bridge_name(name, out->bridge);
+	out->bridge_configured = false;
+	out->has_subnet = false;
+	return true;
+}
+
+int config_max_script_time(const struct tr_config *c)
+{
+	int max = 0;
+	for (size_t i = 0; i <= c->nnets; i++) {
+		const struct tr_network *n = i < c->nnets ? &c->nets[i] : (c->has_wildcard ? &c->wildcard : NULL);
+		if (!n)
+			break;
+		/* one request can run create (new bridge) and setup, or teardown */
+		int t = (n->create_script[0] ? n->script_timeout : 0) +
+			(n->setup_script[0] || n->teardown_script[0] ? n->script_timeout : 0);
+		if (t > max)
+			max = t;
+	}
+	return max;
 }
 
 const struct tr_network *config_find_network(const struct tr_config *c, const char *name)
@@ -78,8 +126,27 @@ const struct tr_network *config_find_network(const struct tr_config *c, const ch
 	return NULL;
 }
 
+static void network_defaults(struct tr_network *n, const char *name)
+{
+	memset(n, 0, sizeof(*n));
+	tr_strlcpy(n->name, name, sizeof(n->name));
+	n->outbound_accept = true;
+	n->inbound_accept = false;
+	n->podman_ipam = TR_PODMAN_IPAM_NONE;
+	n->script_timeout = 30;
+	n->subnet_prefix = 24;
+}
+
 static struct tr_network *get_or_add_network(struct tr_config *c, const char *name)
 {
+	if (!strcmp(name, "*")) {
+		if (!c->has_wildcard) {
+			network_defaults(&c->wildcard, "*");
+			c->wildcard.is_wildcard = true;
+			c->has_wildcard = true;
+		}
+		return &c->wildcard;
+	}
 	for (size_t i = 0; i < c->nnets; i++)
 		if (strcmp(c->nets[i].name, name) == 0)
 			return &c->nets[i];
@@ -88,11 +155,7 @@ static struct tr_network *get_or_add_network(struct tr_config *c, const char *na
 		abort();
 	c->nets = nn;
 	struct tr_network *n = &c->nets[c->nnets++];
-	memset(n, 0, sizeof(*n));
-	tr_strlcpy(n->name, name, sizeof(n->name));
-	n->outbound_accept = true;
-	n->inbound_accept = false;
-	n->podman_ipam = TR_PODMAN_IPAM_NONE;
+	network_defaults(n, name);
 	return n;
 }
 
@@ -270,6 +333,45 @@ static int set_network(struct tr_network *n, const char *key, const char *val,
 	} else if (!strcmp(key, "allow_outbound_to")) {
 		strv_clear(&n->allow_outbound_to);
 		strv_split_push(&n->allow_outbound_to, val);
+	} else if (!strcmp(key, "subnet_pool")) {
+		struct tr_ipv4net pool;
+		if (!n->is_wildcard)
+			return seterr(errbuf, errlen, "%s:%d: subnet_pool is only valid in [network:*]", fname, line);
+		if (!tr_parse_ipv4_cidr(val, &pool) || pool.prefix < 8 || pool.prefix > 30 ||
+		    (pool.addr & ~tr_prefix_mask(pool.prefix)) != 0)
+			return seterr(errbuf, errlen,
+				      "%s:%d: subnet_pool must be a network address/prefix (8-30), e.g. 10.100.0.0/16",
+				      fname, line);
+		n->has_pool = true;
+		n->pool_addr = pool.addr;
+		n->pool_prefix = pool.prefix;
+	} else if (!strcmp(key, "subnet_prefix")) {
+		if (!n->is_wildcard)
+			return seterr(errbuf, errlen, "%s:%d: subnet_prefix is only valid in [network:*]", fname, line);
+		if (!tr_parse_int(val, 8, 30, &v))
+			return seterr(errbuf, errlen, "%s:%d: subnet_prefix must be 8-30", fname, line);
+		n->subnet_prefix = (uint8_t)v;
+	} else if (!strcmp(key, "create_script") || !strcmp(key, "setup_script") ||
+		   !strcmp(key, "teardown_script")) {
+		if (*val && val[0] != '/')
+			return seterr(errbuf, errlen, "%s:%d: %s must be an absolute path", fname, line, key);
+		if (key[0] == 'c')
+			CPY(n->create_script);
+		else if (key[0] == 's')
+			CPY(n->setup_script);
+		else
+			CPY(n->teardown_script);
+	} else if (!strcmp(key, "script_timeout")) {
+		if (!tr_parse_int(val, 1, 600, &v))
+			return seterr(errbuf, errlen, "%s:%d: script_timeout must be 1-600 seconds", fname, line);
+		n->script_timeout = (int)v;
+	} else if (!strcmp(key, "script_on_error")) {
+		if (!strcasecmp(val, "ignore"))
+			n->script_fail = false;
+		else if (!strcasecmp(val, "fail"))
+			n->script_fail = true;
+		else
+			return seterr(errbuf, errlen, "%s:%d: script_on_error must be ignore or fail", fname, line);
 	} else if (!strcmp(key, "nft_rule")) {
 		/* repeatable, accumulates across files */
 		if (strchr(val, '\n') || strchr(val, ';') || strchr(val, '{') || strchr(val, '}'))
@@ -322,7 +424,7 @@ int config_parse_text(struct tr_config *c, const char *text, const char *fname,
 					nn[l - 1] = '\0';
 					nn++;
 				}
-				if (!tr_valid_network_name(nn)) {
+				if (strcmp(nn, "*") != 0 && !tr_valid_network_name(nn)) {
 					rc = seterr(errbuf, errlen, "%s:%d: invalid network name '%s'", fname, line, nn);
 					break;
 				}
@@ -448,12 +550,11 @@ static bool valid_port_rule(const char *r)
 	return tr_parse_int(tmp, 1, 65535, &a);
 }
 
-int config_finalize(struct tr_config *c, char *errbuf, size_t errlen)
+static int validate_network(struct tr_network *n, char *errbuf, size_t errlen)
 {
-	for (size_t i = 0; i < c->nnets; i++) {
-		struct tr_network *n = &c->nets[i];
-		if (!n->bridge_configured)
-			tr_bridge_name(n->name, n->bridge);
+	/* a network from [network:*] gets its subnet from the pool */
+	bool addressed = n->has_subnet || n->has_pool;
+	{
 		if (n->users.n == 0)
 			log_warn("network '%s' has no 'users' entry; nobody will be allowed to use it", n->name);
 		for (size_t u = 0; u < n->users.n; u++) {
@@ -465,11 +566,11 @@ int config_finalize(struct tr_config *c, char *errbuf, size_t errlen)
 			if (!*t)
 				return seterr(errbuf, errlen, "network '%s': empty user/group entry", n->name);
 		}
-		if (n->aardvark_dns && !n->has_subnet)
+		if (n->aardvark_dns && !addressed)
 			return seterr(errbuf, errlen, "network '%s': aardvark_dns requires subnet", n->name);
-		if (n->masquerade && !n->has_subnet)
+		if (n->masquerade && !addressed)
 			return seterr(errbuf, errlen, "network '%s': masquerade requires subnet", n->name);
-		if ((n->hosts_file || n->dnsmasq_hosts[0]) && !n->has_subnet)
+		if ((n->hosts_file || n->dnsmasq_hosts[0]) && !addressed)
 			return seterr(errbuf, errlen, "network '%s': hosts_file/dnsmasq_hosts require subnet", n->name);
 		for (size_t k = 0; k < n->allow_inbound.n; k++)
 			if (!valid_port_rule(n->allow_inbound.v[k]))
@@ -485,6 +586,47 @@ int config_finalize(struct tr_config *c, char *errbuf, size_t errlen)
 					return seterr(errbuf, errlen, "network '%s': '%s' is not an IPv4 address/CIDR",
 						      n->name, cidrs[l]->v[k]);
 			}
+	}
+	return 0;
+}
+
+int config_finalize(struct tr_config *c, char *errbuf, size_t errlen)
+{
+	if (c->has_wildcard) {
+		struct tr_network *w = &c->wildcard;
+		if (w->bridge_configured)
+			return seterr(errbuf, errlen,
+				      "[network:*]: 'bridge' is not allowed (every network gets its own tbr bridge)");
+		if (w->uplink[0])
+			return seterr(errbuf, errlen,
+				      "[network:*]: 'uplink' is not allowed (an interface can only join one bridge)");
+		if (w->has_subnet)
+			return seterr(errbuf, errlen,
+				      "[network:*]: 'subnet' is not allowed (networks would overlap); use subnet_pool");
+		if (w->has_pool && w->subnet_prefix < w->pool_prefix)
+			return seterr(errbuf, errlen, "[network:*]: subnet_prefix /%u is larger than subnet_pool /%u",
+				      w->subnet_prefix, w->pool_prefix);
+		if (w->dnsmasq_hosts[0] && !strstr(w->dnsmasq_hosts, "%n"))
+			return seterr(errbuf, errlen,
+				      "[network:*]: dnsmasq_hosts must contain %%n (the network name), e.g. /etc/dnsmasq.d/trestle-%%n.hosts");
+		if (validate_network(w, errbuf, errlen) < 0)
+			return -1;
+		for (size_t i = 0; i < c->nnets; i++) {
+			struct tr_network *n = &c->nets[i];
+			if (w->has_pool && n->has_subnet) {
+				uint8_t p = n->prefix < w->pool_prefix ? n->prefix : w->pool_prefix;
+				uint32_t m = tr_prefix_mask(p);
+				if ((n->gateway & m) == (w->pool_addr & m))
+					log_info("subnet of network '%s' lies in subnet_pool; it will be skipped", n->name);
+			}
+		}
+	}
+	for (size_t i = 0; i < c->nnets; i++) {
+		struct tr_network *n = &c->nets[i];
+		if (!n->bridge_configured)
+			tr_bridge_name(n->name, n->bridge);
+		if (validate_network(n, errbuf, errlen) < 0)
+			return -1;
 		/* two networks must not share a bridge, nor overlap subnets */
 		for (size_t j = 0; j < i; j++) {
 			struct tr_network *o = &c->nets[j];
