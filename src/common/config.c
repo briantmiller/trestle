@@ -50,6 +50,8 @@ void config_defaults(struct tr_config *c)
 	tr_strlcpy(c->aardvark_binary, TRESTLE_AARDVARK_BINARY, sizeof(c->aardvark_binary));
 	tr_strlcpy(c->aardvark_dir, "/run/trestle/aardvark-dns", sizeof(c->aardvark_dir));
 	c->aardvark_port = 53;
+	c->networkmanager = TR_NM_AUTO;
+	tr_strlcpy(c->nmcli_binary, "/usr/bin/nmcli", sizeof(c->nmcli_binary));
 }
 
 static void network_free(struct tr_network *n)
@@ -228,6 +230,18 @@ static int set_global(struct tr_config *c, const char *key, const char *val,
 		CPY(c->nft_table);
 	} else if (!strcmp(key, "firewall_cleanup")) {
 		BOOL(c->firewall_cleanup);
+	} else if (!strcmp(key, "networkmanager")) {
+		bool b;
+		if (!strcasecmp(val, "auto"))
+			c->networkmanager = TR_NM_AUTO;
+		else if (tr_parse_bool(val, &b))
+			c->networkmanager = b ? TR_NM_YES : TR_NM_NO;
+		else
+			return seterr(errbuf, errlen, "%s:%d: networkmanager must be auto, yes or no", fname, line);
+	} else if (!strcmp(key, "nmcli_binary")) {
+		if (val[0] != '/')
+			return seterr(errbuf, errlen, "%s:%d: nmcli_binary must be an absolute path", fname, line);
+		CPY(c->nmcli_binary);
 	} else if (!strcmp(key, "aardvark_binary")) {
 		CPY(c->aardvark_binary);
 	} else if (!strcmp(key, "aardvark_dir")) {

@@ -59,6 +59,19 @@ the first byte with `SCM_RIGHTS`. Response: header (`magic "TRSP"`,
 The daemon re-validates all of it and never trusts the client's own
 validation, the `rootless` flag or the claimed paths.
 
+## NetworkManager
+
+`nm.c`. When `bridge_ensure()` is about to create a bridge it asks
+`nm_should_unmanage()`: is `networkmanager` enabled, is nmcli executable,
+does no NetworkManager profile (keyfiles in `/etc`, `/run`, `/usr/lib`
+`NetworkManager/system-connections`, or `ifcfg-*` with `DEVICE=`) name the
+interface, and does `nmcli -t -f RUNNING general` say `running`? If so,
+right after creating the bridge it runs `nmcli device set <bridge> managed
+no`, retrying for up to 3 s because NetworkManager notices new links
+asynchronously. A failure is logged and does not fail the request. A
+bridge named by a profile is left to NetworkManager and, as before, never
+deleted by trestle.
+
 ## Concurrency
 
 The main process only accepts connections. Each connection is handled in a

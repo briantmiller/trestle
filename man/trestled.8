@@ -29,13 +29,18 @@ variables, JSON document).
 \fI/proc/<pid>/exe\fR of the caller must be the configured
 \fBclient_binary\fR.
 .IP 3. 4
-The network must have a \fB[network:NAME]\fR section and the user must be
-allowed by its \fBusers\fR list.
+The network must have a \fB[network:NAME]\fR section, or a
+\fB[network:*]\fR catch-all section must exist, and the user must be allowed
+by that section's \fBusers\fR list.
 .IP 4. 4
 The bridge (\fBtbr\fR + first 12 hex digits of md5(network) unless
 \fBbridge\fR is set) is created if missing, brought up, given the
 \fBsubnet\fR address, MTU, STP / VLAN filtering settings and the optional
-\fBuplink\fR.
+\fBuplink\fR. Unless a NetworkManager connection profile names the bridge,
+a bridge trestle creates is marked unmanaged with
+\fBnmcli device set\fR \fIbridge\fR \fBmanaged no\fR when NetworkManager is
+running (see \fBnetworkmanager\fR in
+.BR trestle.conf (5)).
 .IP 5. 4
 For CNI ADD / Netavark setup a veth pair is created. The host side is named
 \fBtrv\fR + first 12 hex digits of md5("\fInetwork\fR:\fIuser\fR:\fIcontainer\fR"),

@@ -121,6 +121,19 @@ optional_policy(`
 	init_dbus_chat(trestled_t)
 ')
 
+# NetworkManager: read connection profiles and run
+# "nmcli device set <bridge> managed no" (D-Bus) for bridges trestle creates
+optional_policy(`
+	networkmanager_read_etc_files(trestled_t)
+	networkmanager_dbus_chat(trestled_t)
+	dbus_system_bus_client(trestled_t)
+	gen_require(`
+		type NetworkManager_var_run_t;
+	')
+	list_dirs_pattern(trestled_t, NetworkManager_var_run_t, NetworkManager_var_run_t)
+	read_files_pattern(trestled_t, NetworkManager_var_run_t, NetworkManager_var_run_t)
+')
+
 # aardvark-dns labeled as a container runtime binary (Fedora / RHEL)
 optional_policy(`
 	gen_require(`

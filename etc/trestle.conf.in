@@ -40,6 +40,12 @@
 # Remove the nftables table when trestled stops.
 #firewall_cleanup = yes
 
+# NetworkManager: bridges trestle creates are marked unmanaged with
+# "nmcli device set <bridge> managed no", unless a NetworkManager profile
+# names them. auto = only when nmcli exists and NetworkManager runs.
+#networkmanager = auto
+#nmcli_binary = /usr/bin/nmcli
+
 # aardvark-dns used for Netavark networks with aardvark_dns = yes
 #aardvark_binary = @AARDVARK_BINARY@
 #aardvark_dir = /run/trestle/aardvark-dns

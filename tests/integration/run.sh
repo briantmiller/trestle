@@ -65,6 +65,15 @@ exit 0
 EOF
 chmod 755 "$IT/bin/aardvark-dns"
 
+# fake nmcli: NetworkManager "running", logs every call
+cat > "$IT/bin/nmcli" <<EOF
+#!/bin/sh
+echo "\$*" >> $IT/nmcli.log
+[ "\$1" = "-t" ] && echo running
+exit 0
+EOF
+chmod 755 "$IT/bin/nmcli"
+
 cat > "$IT/trestle.conf" <<EOF
 [global]
 socket = $IT/trestle.sock
@@ -77,6 +86,8 @@ log_level = debug
 nft_table = trestleit
 aardvark_binary = $IT/bin/aardvark-dns
 aardvark_dir = $IT/aardvark
+networkmanager = yes
+nmcli_binary = $IT/bin/nmcli
 
 [network:itnet]
 users = root, $U1, @$GRP, !nobody
@@ -176,6 +187,8 @@ VETH=trv$(printf 'itnet:root:default-web' | md5sum | cut -c1-12)
 contains "setup hook: host ifname" "$(cat $HO/setup-pod1.env 2>/dev/null)" "TRESTLE_HOST_IFNAME=$VETH"
 contains "host veth named trv+md5(network:user:container)" "$out" "\"name\":\"$VETH\""
 check "bridge $BR exists" ip link show "$BR"
+contains "NetworkManager checked before creating the bridge" "$(cat $IT/nmcli.log 2>/dev/null)" "-t -f RUNNING general"
+contains "new bridge marked unmanaged in NetworkManager" "$(cat $IT/nmcli.log 2>/dev/null)" "device set $BR managed no"
 contains "bridge address" "$(ip -4 addr show "$BR")" "10.231.0.1/24"
 contains "veth enslaved to bridge" "$(ip link show "$VETH")" "master $BR"
 contains "veth alias" "$(ip link show "$VETH")" "alias trestle:root.default-web.itnet"
@@ -388,6 +401,7 @@ ip link add trit-br0 type bridge
 out=$(cni ADD pod9 /var/run/netns/trit3 eth1 "K8S_POD_NAME=late" '{"cniVersion":"1.0.0","name":"itnet2","type":"trestle"}')
 cni DEL pod9 /var/run/netns/trit3 eth1 "K8S_POD_NAME=late" '{"cniVersion":"1.0.0","name":"itnet2","type":"trestle"}' >/dev/null
 check "pre-existing bridge kept" ip link show trit-br0
+contains "only bridges trestle creates are passed to nmcli" "$(grep -c 'device set trit-br0 managed no' $IT/nmcli.log)" "1"
 ip link del trit-br0
 
 # ---------------------------------------------------------------- teardown

@@ -14,6 +14,9 @@ Initial release.
   uplinks.
 * Name publication in `/etc/hosts`, dnsmasq hosts files and aardvark-dns.
 * nftables filtering and masquerading per network.
+* Bridges trestle creates are marked unmanaged in NetworkManager
+  (`nmcli device set <bridge> managed no`) unless a NetworkManager profile
+  names them (`networkmanager`, `nmcli_binary`).
 * Safe bridge removal (only bridges trestle created and no other manager
   claims).
 * `[network:*]` catch-all section for networks without their own section,

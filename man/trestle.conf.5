@@ -61,6 +61,21 @@ Default \fI/usr/sbin/nft\fR and \fBtrestle\fR (table \fBinet trestle\fR).
 .B firewall_cleanup
 Remove the nftables table when the daemon stops. Default yes.
 .TP
+.B networkmanager
+\fBauto\fR (default), \fByes\fR or \fBno\fR. Before trestle creates a bridge
+it checks whether NetworkManager is meant to manage an interface of that name
+(a keyfile with \fBinterface-name=\fR or an ifcfg file with \fBDEVICE=\fR
+names it). If not, and NetworkManager is running, it runs
+\fBnmcli device set\fR \fIbridge\fR \fBmanaged no\fR right after creating the
+bridge so NetworkManager leaves it alone (runtime setting, retried for a few
+seconds until NetworkManager has seen the device). Bridges that already
+exist are never changed. \fBauto\fR silently skips this when nmcli is
+missing or NetworkManager is not running; \fByes\fR logs a warning then;
+\fBno\fR never calls nmcli.
+.TP
+.B nmcli_binary
+Default \fI/usr/bin/nmcli\fR.
+.TP
 .BR aardvark_binary ", " aardvark_dir ", " aardvark_port
 aardvark-dns executable, its configuration directory and port. Defaults
 \fI/usr/libexec/podman/aardvark-dns\fR, \fI/run/trestle/aardvark-dns\fR, 53.

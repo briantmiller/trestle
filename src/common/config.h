@@ -37,6 +37,7 @@
 
 enum tr_ipam_mode { TR_PODMAN_IPAM_NONE, TR_PODMAN_IPAM_HOST_LOCAL };
 enum tr_verify_mode { TR_VERIFY_STRICT, TR_VERIFY_RELAXED, TR_VERIFY_NONE };
+enum tr_nm_mode { TR_NM_AUTO, TR_NM_YES, TR_NM_NO };
 
 struct tr_network {
 	char name[TR_MAX_NAME + 1];
@@ -116,6 +117,10 @@ struct tr_config {
 	char nft_binary[PATH_MAX];
 	char nft_table[64];
 	bool firewall_cleanup;
+
+	/* NetworkManager: mark bridges trestle creates as unmanaged */
+	enum tr_nm_mode networkmanager;
+	char nmcli_binary[PATH_MAX];
 
 	/* aardvark-dns */
 	char aardvark_binary[PATH_MAX];

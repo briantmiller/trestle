@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "../common/log.h"
+#include "nm.h"
 #include "state.h"
 
 /* Does any regular file in dir (optionally filtered by suffix) contain needle? */
@@ -57,12 +58,7 @@ const char *bridge_foreign_manager(const char *prefix, const char *name, int ifi
 	snprintf(p, sizeof(p), "%s/run/NetworkManager/devices/%d", prefix, ifindex);
 	if (ifindex > 0 && file_contains(p, "managed=true"))
 		return "NetworkManager";
-	snprintf(needle, sizeof(needle), "interface-name=%s\n", name);
-	snprintf(p, sizeof(p), "%s/etc/NetworkManager/system-connections", prefix);
-	if (dir_files_contain(p, NULL, needle))
-		return "NetworkManager";
-	snprintf(p, sizeof(p), "%s/run/NetworkManager/system-connections", prefix);
-	if (dir_files_contain(p, NULL, needle))
+	if (nm_profile_claims(prefix, name))
 		return "NetworkManager";
 
 	/* systemd-networkd: link state and .netdev definitions */
@@ -98,6 +94,8 @@ int bridge_ensure(int nlfd, const struct tr_config *cfg, const struct tr_network
 		*created = false;
 	int r = nl_get_link(nlfd, net->bridge, &l);
 	if (r == -ENODEV) {
+		/* decide before creating it: is NetworkManager meant to own it? */
+		bool unmanage = nm_should_unmanage(cfg, net->bridge);
 		r = nl_create_bridge(nlfd, net->bridge, net->mtu, net->stp, net->vlan_filtering);
 		if (r && r != -EEXIST) {
 			snprintf(err, errlen, "cannot create bridge %s: %s", net->bridge, strerror(-r));
@@ -108,6 +106,8 @@ int bridge_ensure(int nlfd, const struct tr_config *cfg, const struct tr_network
 				*created = true;
 			state_mark_bridge(cfg->state_dir, net->bridge, net->name);
 			log_info("created bridge %s for network %s", net->bridge, net->name);
+			if (unmanage)
+				nm_set_unmanaged(cfg, net->bridge);
 		}
 		r = nl_get_link(nlfd, net->bridge, &l);
 		if (!r) {

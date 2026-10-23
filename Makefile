@@ -69,7 +69,7 @@ BUILD := build
 COMMON_SRC := src/common/md5.c src/common/log.c src/common/util.c src/common/config.c \
               src/common/naming.c src/common/proto.c src/common/request.c
 SERVER_SRC := src/server/main.c src/server/handler.c src/server/netlink.c src/server/checks.c \
-              src/server/state.c src/server/dnsout.c src/server/nft.c src/server/bridge.c src/server/hooks.c src/server/netset.c
+              src/server/state.c src/server/dnsout.c src/server/nft.c src/server/bridge.c src/server/hooks.c src/server/netset.c src/server/nm.c
 CLIENT_SRC := src/client/trestle.c
 SERVER_LIB_SRC := $(filter-out src/server/main.c,$(SERVER_SRC))
 
