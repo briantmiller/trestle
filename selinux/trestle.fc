@@ -1,0 +1,7 @@
+/usr/sbin/trestled		--	gen_context(system_u:object_r:trestled_exec_t,s0)
+/usr/bin/trestled		--	gen_context(system_u:object_r:trestled_exec_t,s0)
+
+/var/lib/trestle(/.*)?			gen_context(system_u:object_r:trestle_var_lib_t,s0)
+/run/trestle(/.*)?			gen_context(system_u:object_r:trestle_var_run_t,s0)
+/var/run/trestle(/.*)?			gen_context(system_u:object_r:trestle_var_run_t,s0)
+/tmp/trestle\.sock		-s	gen_context(system_u:object_r:trestle_tmp_t,s0)

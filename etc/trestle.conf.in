@@ -1,0 +1,87 @@
+# /etc/trestle/trestle.conf - configuration for trestled(8) and trestle(8)
+#
+# Files in /etc/trestle/conf.d/*.conf are read afterwards in lexical order.
+# A later value for the same key replaces the earlier one, except nft_rule
+# which accumulates. See trestle.conf(5) for the complete reference.
+#
+# After editing run "trestled -t" to check the file and
+# "systemctl reload trestled" to apply it.
+
+[global]
+# Unix socket the clients connect to. Netavark runs plugins with a private
+# /run, so the socket lives in /tmp. Any existing file at this path is
+# removed when trestled starts.
+#socket = /tmp/trestle.sock
+#socket_owner = root
+#socket_group = root
+#socket_mode = 0777
+
+# Only connections from this binary are accepted (checked through
+# /proc/<pid>/exe). The client checks that the server runs server_binary.
+#client_binary = @LIBEXECDIR@/trestle/trestle
+#server_binary = @SBINDIR@/trestled
+# strict  = the client must be able to verify the server binary
+# relaxed = fall back to uid/process-name checks inside user namespaces
+# no      = do not verify the server (not recommended)
+#verify_server = relaxed
+# Require the server to run with this SELinux type (e.g. trestled_t).
+#server_selinux_type =
+
+#state_dir = @LOCALSTATEDIR@/trestle
+#hosts_path = /etc/hosts
+#log_level = info
+#request_timeout = 10
+
+# Set net.ipv4.ip_forward=1 at start-up (needed for routing/masquerade).
+#ip_forward = no
+
+#nft_binary = @NFT_BINARY@
+#nft_table = trestle
+# Remove the nftables table when trestled stops.
+#firewall_cleanup = yes
+
+# aardvark-dns used for Netavark networks with aardvark_dns = yes
+#aardvark_binary = @AARDVARK_BINARY@
+#aardvark_dir = /run/trestle/aardvark-dns
+#aardvark_port = 53
+
+
+# One section per network. Only networks listed here can be used.
+#
+#[network:lab]
+# Who may use the network: user names, @groups, * for everybody.
+# Prefix with ! to deny; deny entries always win.
+#users = alice, bob, @containers, !mallory
+#
+# Bridge name. Default: tbr + first 12 hex chars of md5(network name).
+# Set it to use an existing host bridge (e.g. one with a physical uplink).
+#bridge = br0
+#
+# Bridge address / prefix. The bridge gets the address, containers get the
+# rest of the subnet and use the bridge as default gateway.
+#subnet = 10.0.0.1/24
+#mtu = 1500
+#stp = no
+#vlan_filtering = no
+# Physical interface to enslave to the bridge.
+#uplink = eno2
+#
+# Name publication for <user>.<container>.<network>.trestle
+#hosts_file = no
+#dnsmasq_hosts = /etc/dnsmasq.d/trestle-lab.hosts
+#dnsmasq_pid_file = /run/dnsmasq.pid
+# Netavark: run aardvark-dns on the bridge address with container names.
+#aardvark_dns = no
+# IPAM mode reported to Podman by "create": none (trestle allocates) or
+# host-local (Podman allocates and passes static IPs).
+#podman_ipam = none
+#
+# nftables
+#firewall = no
+#masquerade = no
+#outbound_policy = accept
+#inbound_policy = drop
+#allow_inbound = tcp:22, tcp:8000-8100, udp:53, icmp
+#allow_inbound_from = 192.168.1.0/24
+#allow_outbound_to = 10.20.0.0/16
+#nft_rule = ip daddr 169.254.169.254 drop

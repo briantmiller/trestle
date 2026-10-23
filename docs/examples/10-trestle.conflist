@@ -1,0 +1,13 @@
+{
+  "cniVersion": "1.0.0",
+  "name": "k8s",
+  "plugins": [
+    {
+      "type": "trestle",
+      "capabilities": { "ips": true, "mac": true }
+    },
+    {
+      "type": "loopback"
+    }
+  ]
+}

@@ -1,0 +1,165 @@
+.\" SPDX-License-Identifier: GPL-3.0-or-later
+.TH TRESTLE.CONF 5 "October 2026" "trestle 0.1" "File Formats"
+.SH NAME
+trestle.conf \- configuration of the trestle container network plugin
+.SH SYNOPSIS
+.I /etc/trestle/trestle.conf
+.br
+.I /etc/trestle/conf.d/*.conf
+.SH DESCRIPTION
+INI style file with one \fB[global]\fR section and one section per permitted
+network, written \fB[network:\fINAME\fB]\fR (or \fB[network "\fINAME\fB"]\fR).
+Lines starting with \fB#\fR or \fB;\fR are comments. Values may be quoted.
+Boolean values accept yes/no, true/false, on/off, 1/0. Files in \fIconf.d\fR
+ending in \fI.conf\fR are read after the main file in lexical order; a later
+value replaces an earlier one, except \fBnft_rule\fR which accumulates.
+Unknown keys are errors. Check a configuration with \fBtrestled \-t\fR.
+.SH [global]
+.TP
+.B socket
+Unix socket path. Default \fI/tmp/trestle.sock\fR.
+.TP
+.BR socket_owner ", " socket_group ", " socket_mode
+Ownership and octal mode applied to the socket. Default root, root, 0777.
+Restricting them (for example group \fIcontainers\fR, mode 0770) limits who
+can talk to the daemon at all.
+.TP
+.B client_binary
+Path of the trestle client. Connections from any other executable are
+rejected. Default \fI/usr/libexec/trestle/trestle\fR.
+.TP
+.B server_binary
+Path of trestled, checked by the client. Default \fI/usr/sbin/trestled\fR.
+.TP
+.B verify_server
+\fBstrict\fR, \fBrelaxed\fR (default) or \fBno\fR. See
+.BR trestle (8).
+.TP
+.B server_selinux_type
+When set, the client requires the daemon's SELinux label to have this type
+(for example \fBtrestled_t\fR).
+.TP
+.B state_dir
+Default \fI/var/lib/trestle\fR.
+.TP
+.B hosts_path
+Hosts file managed for networks with \fBhosts_file = yes\fR. Default
+\fI/etc/hosts\fR.
+.TP
+.B log_level
+error, warning, notice, info (default) or debug.
+.TP
+.B request_timeout
+Seconds a client may take to send its request. Default 10.
+.TP
+.B ip_forward
+Enable net.ipv4.ip_forward at start-up. Default no.
+.TP
+.BR nft_binary ", " nft_table
+Default \fI/usr/sbin/nft\fR and \fBtrestle\fR (table \fBinet trestle\fR).
+.TP
+.B firewall_cleanup
+Remove the nftables table when the daemon stops. Default yes.
+.TP
+.BR aardvark_binary ", " aardvark_dir ", " aardvark_port
+aardvark-dns executable, its configuration directory and port. Defaults
+\fI/usr/libexec/podman/aardvark-dns\fR, \fI/run/trestle/aardvark-dns\fR, 53.
+.SH [network:NAME]
+Only networks that have a section can be used. The name must match the CNI
+\fBname\fR or the Podman network name.
+.TP
+.B users
+Comma separated access list: user names, \fB@\fIgroup\fR, \fB*\fR (everybody).
+Prefix an entry with \fB!\fR to deny; deny entries always win. Containers
+started by root (e.g. Kubernetes) need \fBroot\fR or \fB*\fR. A network
+without \fBusers\fR can not be used.
+.TP
+.B bridge
+Use this bridge instead of \fBtbr\fR+md5. An existing bridge is used as is
+and never deleted.
+.TP
+.B subnet
+\fIbridge-address\fR/\fIprefix\fR, e.g. \fB10.0.0.1/24\fR: 10.0.0.1 is
+assigned to the bridge, containers get 10.0.0.2\-10.0.0.254 and a default
+route via 10.0.0.1. Without a subnet no addresses are configured. Prefix
+8\-30.
+.TP
+.B mtu
+MTU of the bridge and both veth ends.
+.TP
+.BR stp ", " vlan_filtering
+Bridge options used when trestle creates the bridge. Default no.
+.TP
+.B uplink
+Physical interface enslaved to the bridge.
+.TP
+.B hosts_file
+Publish \fIuser\fR.\fIcontainer\fR.\fInetwork\fR.trestle in \fBhosts_path\fR
+inside a managed block (atomic rewrite, mode/owner/SELinux label kept).
+Default no.
+.TP
+.B dnsmasq_hosts
+Write a hosts file for dnsmasq's \fBaddn-hosts\fR option.
+.TP
+.B dnsmasq_pid_file
+Send SIGHUP to this dnsmasq after updating the file.
+.TP
+.B aardvark_dns
+For Netavark containers: run aardvark-dns on the bridge address and register
+the container name, its aliases and the .trestle name. Containers get the
+bridge address as DNS server and \fBdns.podman\fR as search domain.
+.TP
+.B podman_ipam
+\fBnone\fR (default): trestle allocates addresses for all users of the
+bridge, which avoids conflicts between users. \fBhost-local\fR: Podman
+allocates and passes static addresses; conflicts are reported as errors.
+.TP
+.B firewall
+Manage forward rules for this bridge in the trestle nftables table.
+.TP
+.B masquerade
+Masquerade traffic from the subnet leaving through other interfaces.
+.TP
+.BR outbound_policy ", " inbound_policy
+\fBaccept\fR or \fBdrop\fR for new connections from / to containers. Defaults
+accept and drop. Established/related traffic is always accepted.
+.TP
+.B allow_inbound
+\fBtcp:\fIport\fR[\fB\-\fIport\fR], \fBudp:\fIport\fR[\fB\-\fIport\fR] or
+\fBicmp\fR, comma separated.
+.TP
+.B allow_inbound_from
+Source addresses / CIDRs allowed to reach the containers.
+.TP
+.B allow_outbound_to
+Destinations containers may reach when \fBoutbound_policy = drop\fR.
+.TP
+.B nft_rule
+A raw nftables rule placed first in the network's inbound and outbound
+chains. May be given several times.
+.SH EXAMPLE
+.nf
+[global]
+socket_group = containers
+socket_mode = 0770
+ip_forward = yes
+
+[network:lab]
+users = @developers, !intern
+subnet = 10.42.0.1/24
+mtu = 1450
+hosts_file = yes
+aardvark_dns = yes
+firewall = yes
+masquerade = yes
+allow_inbound = tcp:22, tcp:8080, icmp
+
+[network:lan]
+users = *
+bridge = br0
+uplink = eno2
+.fi
+.SH SEE ALSO
+.BR trestle (8),
+.BR trestled (8),
+.BR nft (8)

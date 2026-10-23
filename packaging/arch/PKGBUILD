@@ -1,0 +1,40 @@
+# Maintainer: Brian <brian@email.com>
+pkgname=trestle
+pkgver=0.1
+pkgrel=1
+pkgdesc="CNI and Netavark plugin attaching rootless containers to host bridges"
+arch=('x86_64' 'aarch64')
+url="https://example.com/trestle"
+license=('GPL-3.0-or-later')
+depends=('json-c' 'nftables')
+makedepends=('pkgconf')
+optdepends=('aardvark-dns: container name resolution for Netavark networks'
+            'podman: rootless containers via Netavark'
+            'cni-plugins: loopback and other CNI plugins')
+backup=('etc/trestle/trestle.conf')
+install=trestle.install
+source=("$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+# Arch layout: no separate sbin, libexec is /usr/lib
+_paths=(PREFIX=/usr SBINDIR=/usr/bin LIBEXECDIR=/usr/lib SYSCONFDIR=/etc
+        LOCALSTATEDIR=/var/lib NETAVARK_PLUGINDIR=/usr/lib/netavark
+        CNI_BINDIR=/usr/lib/cni AARDVARK_BINARY=/usr/lib/podman/aardvark-dns
+        NFT_BINARY=/usr/bin/nft UNITDIR=/usr/lib/systemd/system
+        TMPFILESDIR=/usr/lib/tmpfiles.d)
+
+build() {
+  cd "$pkgname-$pkgver"
+  make "${_paths[@]}"
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  make check "${_paths[@]}"
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  make install DESTDIR="$pkgdir" "${_paths[@]}"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

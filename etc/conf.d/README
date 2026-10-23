@@ -1,0 +1,16 @@
+Drop-in configuration for trestled.
+
+Every file ending in .conf in this directory is read after
+/etc/trestle/trestle.conf, in lexical order. Files use the same INI syntax
+([global] and [network:NAME] sections). A later value for a key replaces an
+earlier one; nft_rule entries accumulate.
+
+Example: /etc/trestle/conf.d/10-lab.conf
+
+    [network:lab]
+    users = @labusers
+    subnet = 10.42.0.1/24
+    masquerade = yes
+    firewall = yes
+
+Check with "trestled -t" and apply with "systemctl reload trestled".

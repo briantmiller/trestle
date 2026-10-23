@@ -1,0 +1,14 @@
+post_install() {
+  systemd-tmpfiles --create /usr/lib/tmpfiles.d/trestle.conf
+  echo ":: Edit /etc/trestle/trestle.conf, check it with 'trestled -t' and"
+  echo "   start the daemon with 'systemctl enable --now trestled'."
+}
+
+post_upgrade() {
+  systemd-tmpfiles --create /usr/lib/tmpfiles.d/trestle.conf
+  echo ":: Restart trestled to use the new version: systemctl restart trestled"
+}
+
+pre_remove() {
+  systemctl --no-reload disable --now trestled.service >/dev/null 2>&1 || true
+}

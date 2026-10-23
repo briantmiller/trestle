@@ -1,0 +1,156 @@
+policy_module(trestle, 0.1.0)
+
+########################################
+#
+# Declarations
+#
+# trestled runs as trestled_t. The client binary keeps the standard bin_t
+# label and runs in the domain of its caller (netavark/podman, containerd,
+# CRI-O, kubelet, unconfined users); those domains are granted access to
+# the trestled socket below.
+#
+
+type trestled_t;
+type trestled_exec_t;
+init_daemon_domain(trestled_t, trestled_exec_t)
+
+# /var/lib/trestle
+type trestle_var_lib_t;
+files_type(trestle_var_lib_t)
+
+# /run/trestle (aardvark-dns configuration)
+type trestle_var_run_t;
+files_type(trestle_var_run_t)
+
+# /tmp/trestle.sock
+type trestle_tmp_t;
+files_tmp_file(trestle_tmp_t)
+
+########################################
+#
+# trestled local policy
+#
+
+allow trestled_t self:capability { net_admin sys_admin sys_ptrace dac_override dac_read_search chown fowner kill net_bind_service };
+allow trestled_t self:process { signal signull getsched setfscreate };
+allow trestled_t self:fifo_file rw_fifo_file_perms;
+allow trestled_t self:unix_stream_socket { create_stream_socket_perms listen accept connectto };
+allow trestled_t self:unix_dgram_socket create_socket_perms;
+allow trestled_t self:netlink_route_socket { create_netlink_socket_perms nlmsg_read nlmsg_write };
+allow trestled_t self:udp_socket create_socket_perms;
+allow trestled_t self:tcp_socket create_stream_socket_perms;
+
+# state
+manage_dirs_pattern(trestled_t, trestle_var_lib_t, trestle_var_lib_t)
+manage_files_pattern(trestled_t, trestle_var_lib_t, trestle_var_lib_t)
+files_var_lib_filetrans(trestled_t, trestle_var_lib_t, dir)
+
+# runtime dir
+gen_require(`
+	type var_run_t;
+	type tmp_t;
+')
+manage_dirs_pattern(trestled_t, trestle_var_run_t, trestle_var_run_t)
+manage_files_pattern(trestled_t, trestle_var_run_t, trestle_var_run_t)
+filetrans_pattern(trestled_t, var_run_t, trestle_var_run_t, dir, "trestle")
+allow trestled_t var_run_t:dir rw_dir_perms;
+
+# the socket in /tmp; trestled removes whatever else sits at that path
+manage_sock_files_pattern(trestled_t, trestle_tmp_t, trestle_tmp_t)
+files_tmp_filetrans(trestled_t, trestle_tmp_t, sock_file)
+allow trestled_t tmp_t:dir rw_dir_perms;
+allow trestled_t tmp_t:{ file sock_file lnk_file } { getattr unlink };
+
+# configuration (/etc/trestle is etc_t) and /etc/hosts
+files_read_etc_files(trestled_t)
+files_rw_etc_dirs(trestled_t)
+sysnet_manage_config(trestled_t)
+# temporary files created next to /etc/hosts get net_conf_t, so the
+# atomic rename keeps the correct label
+gen_require(`
+	type etc_t, net_conf_t;
+')
+filetrans_pattern(trestled_t, etc_t, net_conf_t, file)
+
+# identify clients: /proc/<pid>/exe, passwd/group lookups
+domain_read_all_domains_state(trestled_t)
+auth_use_nsswitch(trestled_t)
+
+# network namespaces handed over by clients (setns)
+fs_read_nsfs_files(trestled_t)
+allow trestled_t domain:fd use;
+
+# sysctl net.ipv4.ip_forward, network state
+kernel_read_system_state(trestled_t)
+kernel_read_network_state(trestled_t)
+kernel_rw_net_sysctls(trestled_t)
+
+# aardvark-dns started in our domain when it is labeled bin_t
+corecmd_exec_bin(trestled_t)
+corenet_tcp_bind_generic_node(trestled_t)
+corenet_udp_bind_generic_node(trestled_t)
+corenet_tcp_bind_dns_port(trestled_t)
+corenet_udp_bind_dns_port(trestled_t)
+
+logging_send_syslog_msg(trestled_t)
+miscfiles_read_localization(trestled_t)
+
+# nft
+optional_policy(`
+	iptables_domtrans(trestled_t)
+	gen_require(`
+		type iptables_t;
+	')
+	allow iptables_t trestled_t:fifo_file rw_inherited_fifo_file_perms;
+	allow iptables_t trestled_t:fd use;
+')
+
+# systemd-run --scope for aardvark-dns
+optional_policy(`
+	dbus_system_bus_client(trestled_t)
+	init_dbus_chat(trestled_t)
+')
+
+# aardvark-dns labeled as a container runtime binary (Fedora / RHEL)
+optional_policy(`
+	gen_require(`
+		type container_runtime_t, container_runtime_exec_t;
+	')
+	domtrans_pattern(trestled_t, container_runtime_exec_t, container_runtime_t)
+	allow trestled_t container_runtime_t:process { signal signull sigkill };
+	allow container_runtime_t trestle_var_run_t:dir manage_dir_perms;
+	allow container_runtime_t trestle_var_run_t:file manage_file_perms;
+
+	# netavark / podman run the trestle client
+	allow container_runtime_t trestle_tmp_t:sock_file rw_sock_file_perms;
+	allow container_runtime_t trestled_t:unix_stream_socket connectto;
+	allow container_runtime_t trestled_t:dir search;
+	allow container_runtime_t trestled_t:file read_file_perms;
+	allow container_runtime_t trestled_t:lnk_file read_lnk_file_perms;
+	allow trestled_t container_runtime_t:dir search;
+	allow trestled_t container_runtime_t:file read_file_perms;
+	allow trestled_t container_runtime_t:lnk_file read_lnk_file_perms;
+')
+
+# dnsmasq integration
+optional_policy(`
+	gen_require(`
+		type dnsmasq_t, dnsmasq_etc_t, dnsmasq_var_run_t;
+	')
+	manage_files_pattern(trestled_t, dnsmasq_etc_t, dnsmasq_etc_t)
+	read_files_pattern(trestled_t, dnsmasq_var_run_t, dnsmasq_var_run_t)
+	allow trestled_t dnsmasq_t:process signal;
+')
+
+# unconfined users and services may use the plugin (e.g. podman run from a
+# login shell, containerd/kubelet running unconfined)
+optional_policy(`
+	gen_require(`
+		type unconfined_t, unconfined_service_t;
+	')
+	allow { unconfined_t unconfined_service_t } trestle_tmp_t:sock_file rw_sock_file_perms;
+	allow { unconfined_t unconfined_service_t } trestled_t:unix_stream_socket connectto;
+	allow { unconfined_t unconfined_service_t } trestled_t:dir search;
+	allow { unconfined_t unconfined_service_t } trestled_t:file read_file_perms;
+	allow { unconfined_t unconfined_service_t } trestled_t:lnk_file read_lnk_file_perms;
+')

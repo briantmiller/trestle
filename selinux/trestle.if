@@ -1,0 +1,51 @@
+## <summary>trestle: CNI / Netavark plugin attaching rootless containers to host bridges.</summary>
+
+########################################
+## <summary>
+##	Allow a domain to run the trestle client: connect to the
+##	trestled socket and verify the daemon process.
+## </summary>
+## <param name="domain">
+##	<summary>
+##	Domain allowed access.
+##	</summary>
+## </param>
+#
+interface(`trestle_client',`
+	gen_require(`
+		type trestled_t, trestle_tmp_t;
+	')
+
+	allow $1 trestle_tmp_t:sock_file rw_sock_file_perms;
+	allow $1 trestled_t:unix_stream_socket connectto;
+	allow $1 trestled_t:dir search;
+	allow $1 trestled_t:file read_file_perms;
+	allow $1 trestled_t:lnk_file read_lnk_file_perms;
+	allow trestled_t $1:dir search;
+	allow trestled_t $1:file read_file_perms;
+	allow trestled_t $1:lnk_file read_lnk_file_perms;
+	allow trestled_t $1:fd use;
+')
+
+########################################
+## <summary>
+##	All of the rules required to administrate trestle.
+## </summary>
+## <param name="domain">
+##	<summary>
+##	Domain allowed access.
+##	</summary>
+## </param>
+#
+interface(`trestle_admin',`
+	gen_require(`
+		type trestled_t, trestle_var_lib_t, trestle_var_run_t;
+	')
+
+	allow $1 trestled_t:process { ptrace signal_perms };
+	ps_process_pattern($1, trestled_t)
+	manage_dirs_pattern($1, trestle_var_lib_t, trestle_var_lib_t)
+	manage_files_pattern($1, trestle_var_lib_t, trestle_var_lib_t)
+	manage_dirs_pattern($1, trestle_var_run_t, trestle_var_run_t)
+	manage_files_pattern($1, trestle_var_run_t, trestle_var_run_t)
+')

@@ -1,0 +1,107 @@
+.\" SPDX-License-Identifier: GPL-3.0-or-later
+.TH TRESTLE 8 "October 2026" "trestle 0.1" "System Administration"
+.SH NAME
+trestle \- CNI and Netavark plugin that attaches (rootless) containers to host bridges
+.SH SYNOPSIS
+.B trestle info
+.br
+.B trestle create
+< \fInetwork.json\fR
+.br
+.B trestle setup
+\fInetns-path\fR < \fIplugin-exec.json\fR
+.br
+.B trestle teardown
+\fInetns-path\fR < \fIplugin-exec.json\fR
+.br
+.BR CNI_COMMAND = ADD | DEL | CHECK | VERSION
+.B trestle
+< \fInetwork-config.json\fR
+.SH DESCRIPTION
+.B trestle
+is the unprivileged half of the trestle network plugin. Container runtimes
+execute it either as a Netavark plugin (Podman, sub commands as arguments)
+or as a CNI plugin (Kubernetes / containerd / CRI-O, \fBCNI_*\fR environment
+variables). It never touches the network itself: it validates the call,
+reads the JSON document from standard input and forwards everything to
+.BR trestled (8)
+over the unix socket configured in
+.BR trestle.conf (5)
+(default \fI/tmp/trestle.sock\fR). The exact output of the daemon \- a CNI
+result or a Netavark status block \- is printed on standard output and its
+exit status is returned.
+.PP
+The binary is installed as \fI/usr/libexec/trestle/trestle\fR with symbolic
+links in the Netavark plugin directory and the CNI binary directory, so the
+network driver / plugin type is called \fBtrestle\fR.
+.SS Rootless containers
+When the client runs as an unprivileged user or as uid 0 inside a user
+namespace (rootless Podman runs Netavark like that), the network namespace
+path given to \fBsetup\fR only exists in the caller's private mount
+namespace. The client opens it and passes the open file descriptor to the
+daemon with \fBSCM_RIGHTS\fR. The daemon only accepts a namespace that is
+owned by a user namespace created by the calling user.
+.SS Local answers
+\fBtrestle info\fR and \fBCNI_COMMAND=VERSION\fR are answered by the client
+itself, so they work while the daemon is stopped.
+.SS Verifying the daemon
+Before sending anything the client checks that the socket is served by a root
+process running the configured \fBserver_binary\fR (see \fBverify_server\fR in
+.BR trestle.conf (5)).
+Inside a rootless user namespace the kernel does not allow reading
+\fI/proc/<pid>/exe\fR of a root process; in the default \fBrelaxed\fR mode the
+client then checks the process name and that the peer and the socket file are
+owned by root (seen as the overflow uid).
+.SH NETAVARK
+.TP
+.B create
+Called by \fBpodman network create \-d trestle\fR. The network must be
+configured in trestle and the user permitted. The bridge is created and the
+returned configuration carries the bridge name, the subnet (when
+\fBpodman_ipam=host-local\fR) and the IPAM driver.
+.TP
+.BI setup " netns"
+Creates the veth pair, assigns the address and default route and prints the
+status block.
+.TP
+.BI teardown " netns"
+Removes the host side of the veth (which also removes the peer), releases the
+address and removes DNS / hosts entries.
+.SH CNI
+Supported versions: 0.3.0, 0.3.1, 0.4.0 and 1.0.0. Commands: ADD, DEL, CHECK
+and VERSION. The container name used for naming is
+\fIK8S_POD_NAMESPACE\fR\-\fIK8S_POD_NAME\fR from \fBCNI_ARGS\fR, or the
+first 12 characters of \fBCNI_CONTAINERID\fR. Static addresses can be
+requested with \fBIP=\fR in \fBCNI_ARGS\fR or the \fBips\fR capability
+(\fBruntimeConfig.ips\fR), MAC addresses with \fBMAC=\fR or
+\fBruntimeConfig.mac\fR.
+.PP
+Example network configuration:
+.PP
+.nf
+.RS
+{ "cniVersion": "1.0.0", "name": "lab", "type": "trestle" }
+.RE
+.fi
+.SH ENVIRONMENT
+.TP
+.B TRESTLE_CONFIG
+Alternative configuration file (only \fBsocket\fR, \fBsocket_owner\fR,
+\fBserver_binary\fR, \fBverify_server\fR, \fBserver_selinux_type\fR and
+\fBrequest_timeout\fR matter to the client).
+.TP
+.B TRESTLE_DEBUG
+Print debug messages on standard error.
+.SH EXIT STATUS
+0 on success, otherwise 1 with an error document on standard output
+(\fB{"error": ...}\fR for Netavark, a CNI error object for CNI).
+.SH FILES
+.TP
+.I /etc/trestle/trestle.conf
+.TP
+.I /tmp/trestle.sock
+.SH SEE ALSO
+.BR trestled (8),
+.BR trestle.conf (5),
+.BR podman-network-create (1),
+.BR netavark (1)

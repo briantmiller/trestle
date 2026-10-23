@@ -1,0 +1,100 @@
+.\" SPDX-License-Identifier: GPL-3.0-or-later
+.TH TRESTLED 8 "October 2026" "trestle 0.1" "System Administration"
+.SH NAME
+trestled \- privileged daemon of the trestle container network plugin
+.SH SYNOPSIS
+.B trestled
+.RB [ \-c
+.IR file ]
+.RB [ \-f ]
+.RB [ \-d ]
+.RB [ \-t ]
+.SH DESCRIPTION
+.B trestled
+runs as root and performs the network work requested by the
+.BR trestle (8)
+client on behalf of CNI runtimes and Netavark, including rootless Podman.
+It listens on a unix socket (default \fI/tmp/trestle.sock\fR; Netavark runs
+plugins with a private \fI/run\fR, so \fI/tmp\fR is used). At start-up any
+file already present at the socket path is removed, and the socket is
+recreated if it is later deleted or replaced. Its owner, group and mode come
+from the configuration (default root:root 0777).
+.PP
+Each request is handled as follows:
+.IP 1. 4
+The caller's uid and pid are read with \fBSO_PEERCRED\fR and the user name is
+looked up. The request is parsed and validated again (arguments, \fBCNI_*\fR
+variables, JSON document).
+.IP 2. 4
+\fI/proc/<pid>/exe\fR of the caller must be the configured
+\fBclient_binary\fR.
+.IP 3. 4
+The network must have a \fB[network:NAME]\fR section and the user must be
+allowed by its \fBusers\fR list.
+.IP 4. 4
+The bridge (\fBtbr\fR + first 12 hex digits of md5(network) unless
+\fBbridge\fR is set) is created if missing, brought up, given the
+\fBsubnet\fR address, MTU, STP / VLAN filtering settings and the optional
+\fBuplink\fR.
+.IP 5. 4
+For CNI ADD / Netavark setup a veth pair is created. The host side is named
+\fBtrv\fR + first 12 hex digits of md5("\fInetwork\fR:\fIuser\fR:\fIcontainer\fR"),
+gets the alias \fBtrestle:\fIuser\fB.\fIcontainer\fB.\fInetwork\fR and is
+enslaved to the bridge. The peer is created directly inside the container
+network namespace (received as a file descriptor for rootless callers) with
+the interface name requested by the runtime. An address from the subnet and
+a default route via the bridge are configured.
+.IP 6. 4
+Names \fIuser\fR.\fIcontainer\fR.\fInetwork\fR.trestle are published in
+\fI/etc/hosts\fR, a dnsmasq hosts file and/or aardvark-dns, as configured.
+.PP
+DEL / teardown reverse these steps. A bridge is deleted only when trestle
+created it, no ports other than the configured uplink remain, and it is not
+claimed by NetworkManager, systemd-networkd or libvirt.
+.PP
+Leases and attachment records are kept in \fI/var/lib/trestle\fR, so the
+daemon can be restarted at any time without affecting running containers.
+.SH OPTIONS
+.TP
+.BI \-c ", \-\-config " file
+Configuration file (default \fI/etc/trestle/trestle.conf\fR). Drop-ins are
+read from the \fIconf.d\fR directory next to it.
+.TP
+.BR \-f ", " \-\-foreground
+Log to standard error. Under systemd messages always go to the journal with
+proper priorities.
+.TP
+.BR \-d ", " \-\-debug
+Debug logging (overrides \fBlog_level\fR).
+.TP
+.BR \-t ", " \-\-test
+Check the configuration, print the networks and the generated nftables
+ruleset, and exit.
+.TP
+.BR \-V ", " \-\-version
+.SH SIGNALS
+.TP
+.B SIGHUP
+Reload the configuration, re-apply nftables rules, socket permissions and the
+managed \fI/etc/hosts\fR block. An invalid configuration is rejected and the
+running one is kept.
+.TP
+.BR SIGTERM ", " SIGINT
+Remove the socket and (with \fBfirewall_cleanup\fR) the nftables table, then
+exit. Containers stay connected.
+.SH FILES
+.TP
+.I /etc/trestle/trestle.conf
+.TP
+.I /etc/trestle/conf.d/*.conf
+.TP
+.I /var/lib/trestle/
+leases (\fIipam/\fR), attachments, bridge ownership markers.
+.TP
+.I /run/trestle/aardvark-dns/
+aardvark-dns configuration for networks with \fBaardvark_dns = yes\fR.
+.SH SEE ALSO
+.BR trestle (8),
+.BR trestle.conf (5),
+.BR nft (8),
+.BR systemctl (1)

@@ -1,0 +1,25 @@
+#!/usr/bin/make -f
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+PATHS = PREFIX=/usr SBINDIR=/usr/sbin LIBEXECDIR=/usr/libexec \
+	SYSCONFDIR=/etc LOCALSTATEDIR=/var/lib \
+	CNI_BINDIR=/usr/lib/cni NETAVARK_PLUGINDIR=/usr/libexec/netavark \
+	AARDVARK_BINARY=/usr/lib/podman/aardvark-dns \
+	UNITDIR=/usr/lib/systemd/system TMPFILESDIR=/usr/lib/tmpfiles.d
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	dh_auto_build -- $(PATHS)
+
+override_dh_auto_test:
+ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+	$(MAKE) check $(PATHS)
+endif
+
+override_dh_auto_install:
+	$(MAKE) install DESTDIR=$(CURDIR)/debian/trestle $(PATHS) DOCDIR=/usr/share/doc/trestle
+
+override_dh_installsystemd:
+	dh_installsystemd --name=trestled
