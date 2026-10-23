@@ -120,4 +120,4 @@ works on hosts running in FIPS mode.
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
 
-Maintainer: Brian <brian@email.com>
+Maintainer: Brian Miller <brianthomasmiller@gmail.com>
