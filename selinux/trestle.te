@@ -14,6 +14,15 @@ type trestled_t;
 type trestled_exec_t;
 init_daemon_domain(trestled_t, trestled_exec_t)
 
+# trestled.service sets NoNewPrivileges=yes, so systemd may only start the
+# daemon in trestled_t with nnp_transition (Fedora's init_nnp_daemon_domain();
+# written out because the reference policy has no such interface). Without
+# it the daemon stays in init_t.
+gen_require(`
+	type init_t;
+')
+allow init_t trestled_t:process2 { nnp_transition nosuid_transition };
+
 # /var/lib/trestle
 type trestle_var_lib_t;
 files_type(trestle_var_lib_t)
@@ -115,6 +124,9 @@ optional_policy(`
 	allow iptables_t trestled_t:fd use;
 	# the unit runs with NoNewPrivileges=yes; allow the transition anyway
 	allow trestled_t iptables_t:process2 { nnp_transition nosuid_transition };
+	# normal side effects of the domain transition (secure-exec environment
+	# cleanup, rlimit and signal reset); nft needs none of them disabled
+	dontaudit trestled_t iptables_t:process { noatsecure rlimitinh siginh };
 ')
 
 # systemd-run --scope for aardvark-dns
