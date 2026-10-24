@@ -30,7 +30,8 @@ int nl_get_link_by_index(int fd, int ifindex, struct nl_link *out);
 typedef int (*nl_link_cb)(const struct nl_link *l, void *ctx);
 int nl_dump_links(int fd, nl_link_cb cb, void *ctx);
 
-int nl_create_bridge(int fd, const char *name, int mtu, bool stp, bool vlan_filtering);
+/* mac (may be NULL): fixed bridge address */
+int nl_create_bridge(int fd, const char *name, int mtu, bool stp, bool vlan_filtering, const uint8_t *mac);
 /* Create veth <host> in the current netns with peer <peer> directly placed in
  * the netns referenced by peer_nsfd. peer_mac may be NULL. */
 int nl_create_veth(int fd, const char *host, const char *peer, int peer_nsfd,
@@ -43,6 +44,7 @@ int nl_set_mtu(int fd, int ifindex, int mtu);
 
 /* IPv4 addresses (host byte order) */
 int nl_addr_add(int fd, int ifindex, uint32_t addr, uint8_t prefix);
+int nl_addr_del(int fd, int ifindex, uint32_t addr, uint8_t prefix);  /* routes via it go too */
 int nl_addr_has(int fd, int ifindex, uint32_t addr, uint8_t *prefix_out); /* 1 yes, 0 no, <0 err */
 int nl_addr_first(int fd, int ifindex, uint32_t *addr, uint8_t *prefix); /* -ENOENT if none */
 int nl_route_add_default(int fd, int ifindex, uint32_t gw);

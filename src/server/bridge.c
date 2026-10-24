@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "../common/log.h"
+#include "../common/md5.h"
 #include "firewalld.h"
 #include "nm.h"
 #include "state.h"
@@ -97,7 +98,16 @@ int bridge_ensure(int nlfd, const struct tr_config *cfg, const struct tr_network
 	if (r == -ENODEV) {
 		/* decide before creating it: is NetworkManager meant to own it? */
 		bool unmanage = nm_should_unmanage(cfg, net->bridge);
-		r = nl_create_bridge(nlfd, net->bridge, net->mtu, net->stp, net->vlan_filtering);
+		/* stable, locally administered unicast MAC from the bridge name */
+		uint8_t mac[6], dig[16];
+		trestle_md5_ctx m;
+		trestle_md5_init(&m);
+		trestle_md5_update(&m, "trestle-bridge:", 15);
+		trestle_md5_update(&m, net->bridge, strlen(net->bridge));
+		trestle_md5_final(&m, dig);
+		memcpy(mac, dig, 6);
+		mac[0] = (uint8_t)((mac[0] & 0xfe) | 0x02);
+		r = nl_create_bridge(nlfd, net->bridge, net->mtu, net->stp, net->vlan_filtering, mac);
 		if (r && r != -EEXIST) {
 			snprintf(err, errlen, "cannot create bridge %s: %s", net->bridge, strerror(-r));
 			return -1;

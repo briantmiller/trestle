@@ -13,10 +13,11 @@
 # Arch Linux: see packaging/arch/PKGBUILD.
 
 NAME     := trestle
-VERSION  := 0.1
+VERSION  := 0.2
 
 PREFIX        ?= /usr
 SBINDIR       ?= $(PREFIX)/sbin
+BINDIR        ?= $(PREFIX)/bin
 LIBEXECDIR    ?= $(PREFIX)/libexec
 SYSCONFDIR    ?= /etc
 LOCALSTATEDIR ?= /var/lib
@@ -69,7 +70,7 @@ BUILD := build
 COMMON_SRC := src/common/md5.c src/common/log.c src/common/util.c src/common/config.c \
               src/common/naming.c src/common/proto.c src/common/request.c
 SERVER_SRC := src/server/main.c src/server/handler.c src/server/netlink.c src/server/checks.c \
-              src/server/state.c src/server/dnsout.c src/server/nft.c src/server/bridge.c src/server/hooks.c src/server/netset.c src/server/nm.c src/server/exec.c src/server/firewalld.c
+              src/server/state.c src/server/dnsout.c src/server/nft.c src/server/bridge.c src/server/hooks.c src/server/netset.c src/server/nm.c src/server/exec.c src/server/firewalld.c src/server/dhcp.c src/server/keeper.c src/server/gc.c
 CLIENT_SRC := src/client/trestle.c
 SERVER_LIB_SRC := $(filter-out src/server/main.c,$(SERVER_SRC))
 
@@ -105,10 +106,11 @@ check test: $(UNIT_TESTS)
 
 integration-test: all
 	tests/integration/run.sh $(CURDIR)/$(BUILD)
+	tests/integration/features.sh $(CURDIR)/$(BUILD)
 
 # ---- install -------------------------------------------------------------
 install: all
-	$(INSTALL) -d $(DESTDIR)$(SBINDIR) $(DESTDIR)$(LIBEXECDIR)/$(NAME) \
+	$(INSTALL) -d $(DESTDIR)$(SBINDIR) $(DESTDIR)$(BINDIR) $(DESTDIR)$(LIBEXECDIR)/$(NAME) \
 		$(DESTDIR)$(NETAVARK_PLUGINDIR) $(DESTDIR)$(CNI_BINDIR) \
 		$(DESTDIR)$(SYSCONFDIR)/$(NAME)/conf.d $(DESTDIR)$(UNITDIR) $(DESTDIR)$(TMPFILESDIR) \
 		$(DESTDIR)$(MANDIR)/man5 $(DESTDIR)$(MANDIR)/man8 $(DESTDIR)$(DOCDIR)/examples
@@ -116,6 +118,7 @@ install: all
 	$(INSTALL) -m 0755 $(BUILD)/trestle $(DESTDIR)$(CLIENT_PATH)
 	ln -sf $(CLIENT_PATH) $(DESTDIR)$(NETAVARK_PLUGINDIR)/$(NAME)
 	ln -sf $(CLIENT_PATH) $(DESTDIR)$(CNI_BINDIR)/$(NAME)
+	ln -sf $(CLIENT_PATH) $(DESTDIR)$(BINDIR)/trestlectl
 	@if [ ! -e $(DESTDIR)$(SYSCONFDIR)/$(NAME)/trestle.conf ]; then \
 		sed -e 's|@LIBEXECDIR@|$(LIBEXECDIR)|g' -e 's|@SBINDIR@|$(SBINDIR)|g' \
 		    -e 's|@LOCALSTATEDIR@|$(LOCALSTATEDIR)|g' -e 's|@AARDVARK_BINARY@|$(AARDVARK_BINARY)|g' \
@@ -129,10 +132,10 @@ install: all
 	chmod 0644 $(DESTDIR)$(UNITDIR)/trestled.service
 	$(INSTALL) -m 0644 systemd/trestle.tmpfiles $(DESTDIR)$(TMPFILESDIR)/trestle.conf
 	$(INSTALL) -m 0644 man/trestle.conf.5 $(DESTDIR)$(MANDIR)/man5/
-	$(INSTALL) -m 0644 man/trestle.8 man/trestled.8 $(DESTDIR)$(MANDIR)/man8/
+	$(INSTALL) -m 0644 man/trestle.8 man/trestled.8 man/trestlectl.8 $(DESTDIR)$(MANDIR)/man8/
 	$(INSTALL) -m 0644 README.md docs/*.md $(DESTDIR)$(DOCDIR)/
 	$(INSTALL) -m 0644 docs/examples/* $(DESTDIR)$(DOCDIR)/examples/
-	$(INSTALL) -d -m 0700 $(DESTDIR)$(LOCALSTATEDIR)/$(NAME)
+	$(INSTALL) -d -m 0711 $(DESTDIR)$(LOCALSTATEDIR)/$(NAME)
 
 selinux:
 	$(MAKE) -C selinux -f /usr/share/selinux/devel/Makefile trestle.pp
@@ -148,7 +151,8 @@ uninstall:
 	      $(DESTDIR)$(NETAVARK_PLUGINDIR)/$(NAME) $(DESTDIR)$(CNI_BINDIR)/$(NAME) \
 	      $(DESTDIR)$(UNITDIR)/trestled.service $(DESTDIR)$(TMPFILESDIR)/trestle.conf \
 	      $(DESTDIR)$(MANDIR)/man5/trestle.conf.5 $(DESTDIR)$(MANDIR)/man8/trestle.8 \
-	      $(DESTDIR)$(MANDIR)/man8/trestled.8
+	      $(DESTDIR)$(MANDIR)/man8/trestled.8 $(DESTDIR)$(MANDIR)/man8/trestlectl.8 \
+	      $(DESTDIR)$(BINDIR)/trestlectl
 	rm -rf $(DESTDIR)$(DOCDIR)
 	-rmdir $(DESTDIR)$(LIBEXECDIR)/$(NAME)
 
@@ -161,6 +165,7 @@ dist:
 	find $(BUILD)/dist -name '*.o' -delete
 	rm -f $(BUILD)/dist/$(NAME)-$(VERSION)/selinux/*.pp
 	rm -rf $(BUILD)/dist/$(NAME)-$(VERSION)/selinux/tmp
+	cd $(BUILD)/dist/$(NAME)-$(VERSION)/debian && rm -rf trestle .debhelper files *.substvars *.debhelper *.debhelper.log debhelper-build-stamp
 	tar -C $(BUILD)/dist -czf $(NAME)-$(VERSION).tar.gz $(NAME)-$(VERSION)
 	@echo "created $(NAME)-$(VERSION).tar.gz"
 
@@ -179,7 +184,7 @@ security-test: all
 FUZZ_CC     ?= clang
 FUZZ_FLAGS  := -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
                -DTRESTLE_FUZZ -std=gnu11 -Isrc $(JSONC_CFLAGS) $(DEFS)
-FUZZ_TARGETS := request wire proto config
+FUZZ_TARGETS := request wire proto config dhcp
 FUZZ_BINS   := $(FUZZ_TARGETS:%=$(BUILD)/fuzz/fuzz_%)
 FUZZ_TIME   ?= 60
 

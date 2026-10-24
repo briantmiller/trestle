@@ -2,7 +2,7 @@
 %global modulename trestle
 
 Name:           trestle
-Version:        0.1
+Version:        0.2
 Release:        1%{?dist}
 Summary:        CNI and Netavark plugin attaching rootless containers to host bridges
 License:        GPL-3.0-or-later
@@ -48,14 +48,14 @@ allows container runtimes to use the trestle socket.
 # exports CFLAGS/LDFLAGS; the Makefile adds its own required flags
 %set_build_flags
 %make_build \
-    PREFIX=%{_prefix} SBINDIR=%{_sbindir} LIBEXECDIR=%{_libexecdir} \
+    PREFIX=%{_prefix} SBINDIR=%{_sbindir} BINDIR=%{_bindir} LIBEXECDIR=%{_libexecdir} \
     SYSCONFDIR=%{_sysconfdir} LOCALSTATEDIR=%{_localstatedir}/lib
 make selinux
 bzip2 -9 selinux/%{modulename}.pp
 
 %install
 make install DESTDIR=%{buildroot} \
-    PREFIX=%{_prefix} SBINDIR=%{_sbindir} LIBEXECDIR=%{_libexecdir} \
+    PREFIX=%{_prefix} SBINDIR=%{_sbindir} BINDIR=%{_bindir} LIBEXECDIR=%{_libexecdir} \
     SYSCONFDIR=%{_sysconfdir} LOCALSTATEDIR=%{_localstatedir}/lib \
     UNITDIR=%{_unitdir} TMPFILESDIR=%{_tmpfilesdir} MANDIR=%{_mandir} \
     DOCDIR=%{_docdir}/%{name}
@@ -67,7 +67,7 @@ install -D -m 0644 selinux/%{modulename}.if \
 %check
 %set_build_flags
 make check \
-    PREFIX=%{_prefix} SBINDIR=%{_sbindir} LIBEXECDIR=%{_libexecdir} \
+    PREFIX=%{_prefix} SBINDIR=%{_sbindir} BINDIR=%{_bindir} LIBEXECDIR=%{_libexecdir} \
     SYSCONFDIR=%{_sysconfdir} LOCALSTATEDIR=%{_localstatedir}/lib
 
 %post
@@ -97,6 +97,7 @@ fi
 %license LICENSE
 %doc %{_docdir}/%{name}
 %{_sbindir}/trestled
+%{_bindir}/trestlectl
 %dir %{_libexecdir}/trestle
 %{_libexecdir}/trestle/trestle
 %{_libexecdir}/netavark/trestle
@@ -108,10 +109,11 @@ fi
 %{_sysconfdir}/trestle/conf.d/README
 %{_unitdir}/trestled.service
 %{_tmpfilesdir}/trestle.conf
-%dir %attr(0700,root,root) %{_localstatedir}/lib/trestle
+%dir %attr(0711,root,root) %{_localstatedir}/lib/trestle
 %{_mandir}/man5/trestle.conf.5*
 %{_mandir}/man8/trestle.8*
 %{_mandir}/man8/trestled.8*
+%{_mandir}/man8/trestlectl.8*
 
 %files selinux
 %{_datadir}/selinux/packages/%{selinuxtype}/%{modulename}.pp.bz2
@@ -119,5 +121,14 @@ fi
 %ghost %verify(not md5 size mode mtime) %{_localstatedir}/lib/selinux/%{selinuxtype}/active/modules/200/%{modulename}
 
 %changelog
+* Sat Oct 24 2026 Brian Miller <brianthomasmiller@gmail.com> - 0.2-1
+- Anti-spoofing: containers may only use their own MAC and IP (nftables bridge table)
+- Isolation between users or containers on a bridge (isolation = user | container)
+- Stale state cleanup at start, every gc_interval and with trestlectl gc
+- CNI 1.1.0 GC and STATUS
+- trestlectl admin tool (status, list, leases, gc, detach)
+- ipam = dhcp: leases from the LAN DHCP server, renewed by a keeper process
+- Fixed MAC address on bridges trestle creates
+
 * Fri Oct 23 2026 Brian Miller <brianthomasmiller@gmail.com> - 0.1-1
 - Initial package

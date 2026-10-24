@@ -1,0 +1,81 @@
+.\" SPDX-License-Identifier: GPL-3.0-or-later
+.TH TRESTLECTL 8 "October 2026" "trestle 0.2" "System Administration"
+.SH NAME
+trestlectl \- inspect and clean up trestle attachments
+.SH SYNOPSIS
+.B trestlectl status
+.RB [ \-\-json ]
+.br
+.B trestlectl list
+.RB [ \-n
+.IR network ]
+.RB [ \-\-json ]
+.br
+.B trestlectl leases
+.RB [ \-n
+.IR network ]
+.RB [ \-\-json ]
+.br
+.B trestlectl gc
+.RB [ \-n
+.IR network ]
+.RB [ \-\-dry\-run ]
+.RB [ \-\-json ]
+.br
+.B trestlectl detach
+.I network container-id
+.SH DESCRIPTION
+.B trestlectl
+asks
+.BR trestled (8)
+about the networks and attachments it manages. It is the trestle client
+binary (a symlink to it), so it talks to the daemon over the same socket
+and passes the same identity checks.
+.TP
+.B status
+Networks (configured, created from \fB[network:*]\fR, or with state left),
+their bridge (\fB*\fR = currently absent), subnet, IPAM mode, isolation,
+anti-spoofing, number of attachments and free addresses. Non-root users
+see the networks they may use.
+.TP
+.B list
+Attachments: network, container id and name, user, host and container
+interface, IP, MAC and state (\fBup\fR, \fBSTALE\fR when the host veth no
+longer exists, \fBdhcp\fR / \fBdhcp-no-keeper\fR). Non-root users see only
+their own attachments.
+.TP
+.B leases
+IP leases and whether an attachment still holds them (\fBORPHANED\fR
+otherwise). Root only.
+.TP
+.B gc
+Run the stale state sweep now (see \fBgc_interval\fR in
+.BR trestle.conf (5)):
+remove attachments whose host veth is gone, release orphaned leases and
+restart lost DHCP keepers. \fB\-\-dry\-run\fR only reports. Root only.
+.TP
+.B detach
+Remove an attachment as a teardown would (hook script, DHCP release, veth,
+lease, DNS entries). For containers the runtime forgot about. Users may
+detach their own containers, root any.
+.SH OPTIONS
+.TP
+.BR \-n ", " \-\-network " \fInetwork\fR"
+Limit to one network.
+.TP
+.B \-\-json
+Print the daemon's JSON answer instead of a table.
+.SH EXIT STATUS
+0 on success, 1 when the daemon refused or failed the request, 2 on usage
+errors.
+.SH EXAMPLES
+.nf
+# trestlectl status
+# trestlectl list -n dev
+# trestlectl gc --dry-run
+# trestlectl detach dev 3f2a9c...
+.fi
+.SH SEE ALSO
+.BR trestle (8),
+.BR trestled (8),
+.BR trestle.conf (5)

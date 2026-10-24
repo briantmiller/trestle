@@ -178,6 +178,32 @@ int netns_validate(int nsfd, uid_t peer_uid, char *err, size_t errlen)
 	return 0;
 }
 
+int netns_socket(int nsfd, int domain, int type, int proto, char *err, size_t errlen)
+{
+	int self = open("/proc/self/ns/net", O_RDONLY | O_CLOEXEC);
+	if (self < 0) {
+		snprintf(err, errlen, "open own netns: %s", strerror(errno));
+		return -1;
+	}
+	if (setns(nsfd, CLONE_NEWNET) < 0) {
+		snprintf(err, errlen, "cannot enter container network namespace: %s", strerror(errno));
+		close(self);
+		return -1;
+	}
+	int fd = socket(domain, type | SOCK_CLOEXEC, proto);
+	int e = errno;
+	if (setns(self, CLONE_NEWNET) < 0) {
+		log_err("FATAL: cannot return to host network namespace: %s", strerror(errno));
+		abort();
+	}
+	close(self);
+	if (fd < 0) {
+		snprintf(err, errlen, "socket in container netns: %s", strerror(e));
+		return -1;
+	}
+	return fd;
+}
+
 int netns_nl_open(int nsfd, char *err, size_t errlen)
 {
 	int self = open("/proc/self/ns/net", O_RDONLY | O_CLOEXEC);

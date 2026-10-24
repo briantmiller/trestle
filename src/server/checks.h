@@ -45,6 +45,8 @@ bool acl_allowed(const struct strv *acl, const struct tr_peer *p, char *why, siz
 int netns_validate(int nsfd, uid_t peer_uid, char *err, size_t errlen);
 
 /* Open a NETLINK_ROUTE socket inside the given network namespace. */
+/* A socket created inside the network namespace nsfd (it stays there). */
+int netns_socket(int nsfd, int domain, int type, int proto, char *err, size_t errlen);
 int netns_nl_open(int nsfd, char *err, size_t errlen);
 
 #endif

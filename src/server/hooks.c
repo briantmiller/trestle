@@ -20,7 +20,7 @@
 #include "../common/naming.h"
 
 #ifndef TRESTLE_VERSION
-#define TRESTLE_VERSION "0.1"
+#define TRESTLE_VERSION "0.2"
 #endif
 
 #define HOOK_NETNS_FD 3

@@ -46,7 +46,7 @@ A
 chmod 755 "$D/aardvark-dns"
 cat > "$D/trestle.conf" <<C
 [global]
-socket = $D/trestle.sock
+socket = $D/state/trestle.sock
 client_binary = $PY
 server_binary = $D/trestled
 state_dir = $D/state
@@ -71,23 +71,23 @@ export ASAN_OPTIONS="log_path=$D/asan/asan:detect_leaks=0:abort_on_error=0"
 export UBSAN_OPTIONS="log_path=$D/asan/ubsan:print_stacktrace=1"
 "$D/trestled" -f -c "$D/trestle.conf" >"$D/server.log" 2>&1 &
 SERVER_PID=$!
-for _ in $(seq 50); do [ -S "$D/trestle.sock" ] && break; sleep 0.1; done
+for _ in $(seq 50); do [ -S "$D/state/trestle.sock" ] && break; sleep 0.1; done
 ip netns add trsec
 BEFORE_LINKS=$(links)
 BEFORE_FILES=$(find / -xdev -newer "$D/trestle.conf" -type f \( -path /proc -o -path /sys -o -path "$D" \) -prune -o -type f -print 2>/dev/null | grep -v "^$D" | sort)
 
 echo "### attacker: allowed user"
-su $UA -s /bin/sh -c "$PY $D/attack.py $D/trestle.sock user /run/netns/trsec" && ok "allowed-user attack cases" || bad "allowed-user attack cases"
+su $UA -s /bin/sh -c "$PY $D/attack.py $D/state/trestle.sock user /run/netns/trsec" && ok "allowed-user attack cases" || bad "allowed-user attack cases"
 echo "### attacker: user without permission"
-out=$(su $UC -s /bin/sh -c "$PY $D/attack.py $D/trestle.sock user /run/netns/trsec" 2>&1)
+out=$(su $UC -s /bin/sh -c "$PY $D/attack.py $D/state/trestle.sock user /run/netns/trsec" 2>&1)
 # for this user every accept case must have failed with a permission error
 if echo "$out" | grep -q "valid setup .*-> 0 "; then bad "unpermitted user got a setup through"; else ok "unpermitted user never attached"; fi
 echo "### attacker: root"
-$PY "$D/attack.py" "$D/trestle.sock" root /run/netns/trsec && ok "root attack cases" || bad "root attack cases"
+$PY "$D/attack.py" "$D/state/trestle.sock" root /run/netns/trsec && ok "root attack cases" || bad "root attack cases"
 
 echo "### slow clients"
 # one user holding many connections, dripping a byte per second
-su $UC -s /bin/sh -c "$PY - $D/trestle.sock" <<'P' &
+su $UC -s /bin/sh -c "$PY - $D/state/trestle.sock" <<'P' &
 import socket, sys, time
 socks = []
 for i in range(80):
@@ -103,7 +103,7 @@ sleep 3
 t0=$(date +%s)
 out=$(su $UA -s /bin/sh -c "$PY -c '
 import socket,struct,sys
-s=socket.socket(socket.AF_UNIX); s.settimeout(30); s.connect(\"$D/trestle.sock\")
+s=socket.socket(socket.AF_UNIX); s.settimeout(30); s.connect(\"$D/state/trestle.sock\")
 s.sendall(struct.pack(\"=IHHI\",0x54525354,1,0,2)+b\"{}\"); s.shutdown(1)
 d=s.recv(4096); print(\"answered\" if len(d)>=12 else \"closed\")
 '" 2>&1)
@@ -114,7 +114,7 @@ if [ "$out" = answered ] && [ $((t1-t0)) -le 6 ]; then ok "dripping clients cann
 
 echo "### side effects"
 kill -0 $SERVER_PID 2>/dev/null && ok "daemon still running" || bad "daemon died"
-[ -S "$D/trestle.sock" ] && ok "socket still there" || bad "socket gone"
+[ -S "$D/state/trestle.sock" ] && ok "socket still there" || bad "socket gone"
 [ "$(links)" = "$BEFORE_LINKS" ] && ok "no interfaces left behind" || bad "interfaces left: $(links | tr '\n' ' ')"
 [ ! -e /tmp/trestle-pwned ] && ok "no injected command ran" || bad "/tmp/trestle-pwned exists"
 grep -q "6.6.6.6\|evil" "$D/hosts" "$D"/dnsmasq-* "$D/aardvark/"* 2>/dev/null && bad "injected name reached DNS output" || ok "no injected names in hosts/dnsmasq/aardvark files"

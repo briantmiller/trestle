@@ -13,11 +13,14 @@
 
 #include "util.h"
 
-enum tr_mode { TR_MODE_CNI, TR_MODE_NETAVARK };
+enum tr_mode { TR_MODE_CNI, TR_MODE_NETAVARK, TR_MODE_ADMIN };
 
 enum tr_cmd {
 	TR_CMD_CNI_ADD, TR_CMD_CNI_DEL, TR_CMD_CNI_CHECK, TR_CMD_CNI_VERSION,
 	TR_CMD_NV_CREATE, TR_CMD_NV_SETUP, TR_CMD_NV_TEARDOWN, TR_CMD_NV_INFO,
+	TR_CMD_CNI_GC, TR_CMD_CNI_STATUS,
+	/* trestlectl */
+	TR_CMD_ADM_STATUS, TR_CMD_ADM_LIST, TR_CMD_ADM_LEASES, TR_CMD_ADM_GC, TR_CMD_ADM_DETACH,
 };
 
 /* CNI spec error codes */
@@ -30,10 +33,13 @@ enum {
 	CNI_ERR_DECODE = 6,
 	CNI_ERR_INVALID_CONFIG = 7,
 	CNI_ERR_TRY_AGAIN = 11,
+	CNI_ERR_NOT_AVAILABLE = 50,          /* STATUS: cannot service ADD */
+	CNI_ERR_NOT_AVAILABLE_LIMITED = 51,
 	CNI_ERR_PLUGIN = 100,
 };
 
-#define TR_CNI_SUPPORTED_VERSIONS "\"0.3.0\",\"0.3.1\",\"0.4.0\",\"1.0.0\""
+#define TR_CNI_SUPPORTED_VERSIONS "\"0.3.0\",\"0.3.1\",\"0.4.0\",\"1.0.0\",\"1.1.0\""
+#define TR_CNI_LATEST_VERSION "1.1.0"
 
 struct tr_request {
 	enum tr_mode mode;
@@ -52,6 +58,12 @@ struct tr_request {
 	struct strv aliases;              /* Netavark DNS aliases */
 	char k8s_pod_name[TR_MAX_NAME + 1];      /* CNI_ARGS, may be empty */
 	char k8s_pod_namespace[TR_MAX_NAME + 1];
+
+	struct strv valid_attachments;    /* CNI GC: "<container id>/<ifname>" */
+
+	/* trestlectl */
+	bool adm_json;
+	bool adm_dry_run;
 
 	json_object *input;               /* parsed stdin, owned */
 };
@@ -74,6 +86,11 @@ int tr_parse_cni(tr_env_fn getenv_fn, void *ctx, const char *stdin_text,
  * after the program name (args[0] is the sub command). */
 int tr_parse_netavark(int nargs, char *const *args, const char *stdin_text,
 		      struct tr_request *out, char *err, size_t errlen);
+
+/* Parse and validate a trestlectl invocation (args after the program name):
+ *   status | list [-n NET] | leases [-n NET] | gc [--dry-run] | detach NET CONTAINER-ID
+ * plus --json anywhere. */
+int tr_parse_admin(int nargs, char *const *args, struct tr_request *out, char *err, size_t errlen);
 
 /* Format an error in the style the caller expects. Caller frees. */
 char *tr_format_cni_error(const char *cni_version, int code, const char *msg, const char *details);

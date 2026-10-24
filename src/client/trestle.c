@@ -31,7 +31,7 @@
 #include "../common/util.h"
 
 #ifndef TRESTLE_VERSION
-#define TRESTLE_VERSION "0.1"
+#define TRESTLE_VERSION "0.2"
 #endif
 
 extern char **environ;
@@ -259,7 +259,8 @@ static char *build_request(int argc, char **argv, const struct tr_request *r,
 {
 	json_object *o = json_object_new_object();
 	json_object_object_add(o, "version", json_object_new_int(TR_PROTO_VERSION));
-	json_object_object_add(o, "mode", json_object_new_string(r->mode == TR_MODE_CNI ? "cni" : "netavark"));
+	json_object_object_add(o, "mode", json_object_new_string(r->mode == TR_MODE_CNI ? "cni" :
+								  r->mode == TR_MODE_ADMIN ? "admin" : "netavark"));
 	json_object_object_add(o, "command", json_object_new_string(r->command));
 
 	json_object *av = json_object_new_array();
@@ -314,6 +315,175 @@ static void load_client_config(struct tr_config *cfg)
 	}
 }
 
+/* ---- trestlectl -------------------------------------------------------- */
+
+static void ctl_usage(FILE *f)
+{
+	fprintf(f,
+		"trestlectl %s - inspect and clean up trestle attachments\n"
+		"\n"
+		"  trestlectl status                 networks, attachments, free addresses\n"
+		"  trestlectl list [-n NETWORK]      attachments (your own unless root)\n"
+		"  trestlectl leases [-n NETWORK]    IP leases (root)\n"
+		"  trestlectl gc [-n NETWORK] [--dry-run]\n"
+		"                                    remove stale attachments and leases (root)\n"
+		"  trestlectl detach NETWORK CONTAINER-ID\n"
+		"                                    force-remove an attachment (owner or root)\n"
+		"\n"
+		"  --json   machine readable output\n",
+		TRESTLE_VERSION);
+}
+
+static const char *js(json_object *o, const char *k)
+{
+	json_object *v;
+	if (!o || !json_object_object_get_ex(o, k, &v) || !v)
+		return "-";
+	const char *s = json_object_get_string(v);
+	return s && *s ? s : "-";
+}
+
+static bool jb(json_object *o, const char *k)
+{
+	json_object *v;
+	return o && json_object_object_get_ex(o, k, &v) && v && json_object_get_boolean(v);
+}
+
+static json_object *ja(json_object *o, const char *k)
+{
+	json_object *v;
+	return o && json_object_object_get_ex(o, k, &v) && json_object_is_type(v, json_type_array) ? v : NULL;
+}
+
+static void print_strings(const char *title, json_object *arr)
+{
+	size_t n = arr ? json_object_array_length(arr) : 0;
+	printf("%s: %zu\n", title, n);
+	for (size_t i = 0; i < n; i++)
+		printf("  %s\n", json_object_get_string(json_object_array_get_idx(arr, i)));
+}
+
+static void ctl_print(const struct tr_request *r, json_object *o)
+{
+	switch (r->cmd) {
+	case TR_CMD_ADM_STATUS: {
+		json_object *a = ja(o, "networks");
+		printf("trestled %s, stale state sweep every %s s\n\n", js(o, "version"), js(o, "gc_interval"));
+		printf("%-20s %-16s %-18s %-7s %-10s %-9s %8s %6s\n", "NETWORK", "BRIDGE", "SUBNET", "IPAM",
+		       "ISOLATION", "ANTISPOOF", "ATTACHED", "FREE");
+		for (size_t i = 0; a && i < json_object_array_length(a); i++) {
+			json_object *e = json_object_array_get_idx(a, i);
+			char br[24];
+			snprintf(br, sizeof(br), "%s%s", js(e, "bridge"), jb(e, "bridge_present") ? "" : "*");
+			printf("%-20s %-16s %-18s %-7s %-10s %-9s %8s %6s\n", js(e, "name"), br, js(e, "subnet"),
+			       js(e, "ipam"), js(e, "isolation"), jb(e, "anti_spoofing") ? "yes" : "no",
+			       js(e, "attachments"), js(e, "free_addresses"));
+		}
+		printf("\n(* = bridge does not exist right now)\n");
+		break;
+	}
+	case TR_CMD_ADM_LIST: {
+		json_object *a = ja(o, "attachments");
+		printf("%-16s %-14s %-20s %-10s %-16s %-6s %-18s %-17s %s\n", "NETWORK", "CONTAINER", "NAME", "USER",
+		       "HOST IF", "IF", "IP", "MAC", "STATE");
+		for (size_t i = 0; a && i < json_object_array_length(a); i++) {
+			json_object *e = json_object_array_get_idx(a, i);
+			char state[64];
+			snprintf(state, sizeof(state), "%s%s", jb(e, "present") ? "up" : "STALE",
+				 jb(e, "dhcp") ? (jb(e, "keeper") ? ",dhcp" : ",dhcp-no-keeper") : "");
+			printf("%-16s %-14.12s %-20s %-10s %-16s %-6s %-18s %-17s %s\n", js(e, "network"),
+			       js(e, "container_id"), js(e, "container_name"), js(e, "user"), js(e, "veth"),
+			       js(e, "ifname"), js(e, "ip"), js(e, "mac"), state);
+		}
+		break;
+	}
+	case TR_CMD_ADM_LEASES: {
+		json_object *a = ja(o, "leases");
+		printf("%-20s %-16s %-14s %s\n", "NETWORK", "IP", "CONTAINER", "STATE");
+		for (size_t i = 0; a && i < json_object_array_length(a); i++) {
+			json_object *e = json_object_array_get_idx(a, i);
+			printf("%-20s %-16s %-14.12s %s\n", js(e, "network"), js(e, "ip"), js(e, "container_id"),
+			       jb(e, "attached") ? "attached" : "ORPHANED");
+		}
+		break;
+	}
+	case TR_CMD_ADM_GC:
+		if (jb(o, "dry_run"))
+			printf("dry run, nothing changed\n");
+		print_strings(jb(o, "dry_run") ? "stale attachments" : "removed attachments", ja(o, "removed"));
+		print_strings(jb(o, "dry_run") ? "orphaned leases" : "released leases", ja(o, "leases"));
+		print_strings(jb(o, "dry_run") ? "DHCP keepers to restart" : "restarted DHCP keepers", ja(o, "keepers"));
+		if (strcmp(js(o, "errors"), "0"))
+			printf("errors: %s (see the trestled log)\n", js(o, "errors"));
+		break;
+	case TR_CMD_ADM_DETACH:
+		printf("detached %s\n", js(o, "detached"));
+		break;
+	default:
+		break;
+	}
+}
+
+static int ctl_main(int argc, char **argv)
+{
+	char err[1024];
+	struct tr_request req;
+	for (int i = 1; i < argc; i++) {
+		if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
+			ctl_usage(stdout);
+			return 0;
+		}
+		if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-V")) {
+			printf("trestlectl %s\n", TRESTLE_VERSION);
+			return 0;
+		}
+	}
+	if (argc > 8) {
+		fprintf(stderr, "trestlectl: too many arguments\n");
+		return 2;
+	}
+	if (tr_parse_admin(argc - 1, argv + 1, &req, err, sizeof(err)) < 0) {
+		fprintf(stderr, "trestlectl: %s\n\n", err);
+		ctl_usage(stderr);
+		return 2;
+	}
+	struct tr_config cfg;
+	load_client_config(&cfg);
+	int sock = connect_socket(cfg.socket_path, cfg.request_timeout + 60, err, sizeof(err));
+	if (sock < 0 || verify_server(sock, &cfg, err, sizeof(err)) < 0) {
+		fprintf(stderr, "trestlectl: %s\n", err);
+		return 1;
+	}
+	char *payload = build_request(argc, argv, &req, "", false, false);
+	int rc = tr_send_request(sock, payload, strlen(payload), -1);
+	free(payload);
+	int exit_code = 1;
+	char *out = NULL;
+	size_t outlen = 0;
+	if (rc == 0)
+		rc = tr_recv_response(sock, &exit_code, &out, &outlen);
+	close(sock);
+	if (rc < 0) {
+		fprintf(stderr, "trestlectl: no valid response from trestled: %s\n", strerror(-rc));
+		return 1;
+	}
+	json_object *o = out ? tr_json_parse_object(out, "response", err, sizeof(err)) : NULL;
+	if (exit_code != 0) {
+		fprintf(stderr, "trestlectl: %s\n", o ? js(o, "error") : (out ? out : "request failed"));
+	} else if (req.adm_json) {
+		fwrite(out, 1, outlen, stdout);
+		fputc('\n', stdout);
+	} else if (o) {
+		ctl_print(&req, o);
+	}
+	if (o)
+		json_object_put(o);
+	free(out);
+	tr_request_free(&req);
+	config_free(&cfg);
+	return exit_code;
+}
+
 int main(int argc, char **argv)
 {
 	char err[1024];
@@ -321,6 +491,12 @@ int main(int argc, char **argv)
 	bool cni = getenv("CNI_COMMAND") != NULL;
 
 	tlog_init("trestle", TLOG_STDERR, getenv("TRESTLE_DEBUG") ? LOG_DEBUG : LOG_WARNING);
+
+	/* one binary: "trestlectl" (symlink) is the admin tool */
+	char self[PATH_MAX];
+	tr_strlcpy(self, argv[0] ? argv[0] : "", sizeof(self));
+	if (!strcmp(basename(self), "trestlectl"))
+		return ctl_main(argc, argv);
 
 	if (!cni && argc >= 2) {
 		if (!strcmp(argv[1], "--version") || !strcmp(argv[1], "-V")) {
@@ -356,7 +532,7 @@ int main(int argc, char **argv)
 		die_mode(mode, req.cni_version, cni_code ? cni_code : CNI_ERR_INVALID_CONFIG, err);
 
 	if (cni && req.cmd == TR_CMD_CNI_VERSION) {
-		const char *v = "1.0.0";
+		const char *v = TR_CNI_LATEST_VERSION;
 		json_object *jv;
 		if (req.input && json_object_object_get_ex(req.input, "cniVersion", &jv) &&
 		    json_object_is_type(jv, json_type_string) &&
@@ -393,11 +569,14 @@ int main(int argc, char **argv)
 		}
 	}
 
-	/* the daemon may run hook scripts before it answers */
-	int sock = connect_socket(cfg.socket_path, cfg.request_timeout + 30 + config_max_script_time(&cfg),
+	/* the daemon may run hook scripts and wait for a DHCP lease before it
+	 * answers */
+	int sock = connect_socket(cfg.socket_path,
+				  cfg.request_timeout + 30 + config_max_script_time(&cfg) + config_max_dhcp_time(&cfg),
 				  err, sizeof(err));
 	if (sock < 0)
-		die_mode(mode, req.cni_version, CNI_ERR_TRY_AGAIN, err);
+		die_mode(mode, req.cni_version,
+			 req.cmd == TR_CMD_CNI_STATUS ? CNI_ERR_NOT_AVAILABLE : CNI_ERR_TRY_AGAIN, err);
 	if (verify_server(sock, &cfg, err, sizeof(err)) < 0)
 		die_mode(mode, req.cni_version, CNI_ERR_PLUGIN, err);
 

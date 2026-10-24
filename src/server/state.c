@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -45,6 +46,30 @@ int state_save(const char *state_dir, const struct tr_attachment *a)
 		   a->ifname, a->veth, a->mac);
 	if (a->has_ip)
 		buf_printf(&b, "ip=%s/%u\n", ip, a->prefix);
+	if (a->dhcp) {
+		char s[16];
+		buf_printf(&b, "dhcp=1\nlease_expiry=%lld\n", a->lease_expiry);
+		if (a->dhcp_server) {
+			tr_fmt_ipv4(a->dhcp_server, s);
+			buf_printf(&b, "dhcp_server=%s\n", s);
+		}
+	}
+	if (a->gateway) {
+		char s[16];
+		tr_fmt_ipv4(a->gateway, s);
+		buf_printf(&b, "gateway=%s\n", s);
+	}
+	if (a->dns[0]) {
+		buf_printf(&b, "dns=");
+		for (int i = 0; i < 3 && a->dns[i]; i++) {
+			char s[16];
+			tr_fmt_ipv4(a->dns[i], s);
+			buf_printf(&b, "%s%s", i ? "," : "", s);
+		}
+		buf_printf(&b, "\n");
+	}
+	if (a->ns_ino)
+		buf_printf(&b, "netns=%llu:%llu\n", a->ns_dev, a->ns_ino);
 	buf_printf(&b, "aliases=");
 	for (size_t i = 0; i < a->aliases.n; i++)
 		buf_printf(&b, "%s%s", i ? "," : "", a->aliases.v[i]);
@@ -98,8 +123,26 @@ int state_load(const char *state_dir, const char *network, const char *cid, stru
 				a->ip = n.addr;
 				a->prefix = n.prefix;
 			}
-		} else if (!strcmp(k, "aliases") && *v)
+		} else if (!strcmp(k, "aliases") && *v) {
 			strv_split_push(&a->aliases, v);
+		} else if (!strcmp(k, "dhcp")) {
+			a->dhcp = !strcmp(v, "1");
+		} else if (!strcmp(k, "lease_expiry")) {
+			a->lease_expiry = strtoll(v, NULL, 10);
+		} else if (!strcmp(k, "dhcp_server")) {
+			tr_parse_ipv4(v, &a->dhcp_server);
+		} else if (!strcmp(k, "gateway")) {
+			tr_parse_ipv4(v, &a->gateway);
+		} else if (!strcmp(k, "dns")) {
+			char tmp[64];
+			tr_strlcpy(tmp, v, sizeof(tmp));
+			int i = 0;
+			for (char *s2 = NULL, *t = strtok_r(tmp, ",", &s2); t && i < 3; t = strtok_r(NULL, ",", &s2))
+				if (tr_parse_ipv4(t, &a->dns[i]))
+					i++;
+		} else if (!strcmp(k, "netns")) {
+			sscanf(v, "%llu:%llu", &a->ns_dev, &a->ns_ino);
+		}
 	}
 	free(text);
 	if (strcmp(a->container_id, cid) != 0 || !a->veth[0]) {
@@ -339,4 +382,82 @@ int ipam_allocate(const char *state_dir, const struct tr_network *net, const cha
 	}
 	snprintf(err, errlen, "no free addresses left in the subnet of network '%s'", net->name);
 	return -1;
+}
+
+static void list_subdirs(const char *dir, struct strv *out)
+{
+	DIR *d = opendir(dir);
+	if (!d)
+		return;
+	struct dirent *de;
+	while ((de = readdir(d)))
+		if (de->d_name[0] != '.' && tr_valid_network_name(de->d_name) && !strv_contains(out, de->d_name))
+			strv_push(out, de->d_name);
+	closedir(d);
+}
+
+int state_networks(const char *state_dir, struct strv *out)
+{
+	char dir[PATH_MAX];
+	snprintf(dir, sizeof(dir), "%s/attachments", state_dir);
+	list_subdirs(dir, out);
+	snprintf(dir, sizeof(dir), "%s/ipam", state_dir);
+	list_subdirs(dir, out);
+	return 0;
+}
+
+int ipam_foreach(const char *state_dir, const char *network, lease_cb cb, void *ctx)
+{
+	char dir[PATH_MAX];
+	int r = dir_for(dir, sizeof(dir), state_dir, "ipam", network);
+	if (r)
+		return r;
+	DIR *d = opendir(dir);
+	if (!d)
+		return errno == ENOENT ? 0 : -errno;
+	struct strv names = { 0 };
+	struct dirent *de;
+	while ((de = readdir(d))) {
+		uint32_t ip;
+		if (de->d_name[0] != '.' && tr_parse_ipv4(de->d_name, &ip))
+			strv_push(&names, de->d_name);
+	}
+	closedir(d);
+	r = 0;
+	for (size_t i = 0; i < names.n && !r; i++) {
+		uint32_t ip;
+		char owner[256];
+		tr_parse_ipv4(names.v[i], &ip);
+		if (lease_owner(dir, ip, owner, sizeof(owner)) == 0)
+			r = cb(ip, owner, ctx);
+	}
+	strv_clear(&names);
+	return r;
+}
+
+int ipam_release_ip(const char *state_dir, const char *network, uint32_t ip)
+{
+	char path[PATH_MAX], s[16];
+	tr_fmt_ipv4(ip, s);
+	if (snprintf(path, sizeof(path), "%s/ipam/%s/%s", state_dir, network, s) >= (int)sizeof(path))
+		return -ENAMETOOLONG;
+	if (unlink(path) < 0 && errno != ENOENT)
+		return -errno;
+	return 0;
+}
+
+int state_lock(const char *state_dir, bool wait)
+{
+	char path[PATH_MAX];
+	snprintf(path, sizeof(path), "%s/state.lock", state_dir);
+	int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+	if (fd < 0)
+		return -1;
+	if (flock(fd, LOCK_EX | (wait ? 0 : LOCK_NB)) < 0) {
+		int e = errno;
+		close(fd);
+		errno = e;
+		return -1;
+	}
+	return fd;
 }

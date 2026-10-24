@@ -14,9 +14,10 @@ The same plugin also works as a regular CNI plugin for Kubernetes
  podman (rootless) ─► netavark ─► trestle ──unix socket──► trestled (root)
  kubelet ─► containerd/CRI-O ─► trestle ─┘    + netns fd     ├─ bridge  tbr…
                                                              ├─ veth    trv…  ⇄ container eth0
-                                                             ├─ IPAM, default route
+                                                             ├─ IPAM or DHCP, default route
                                                              ├─ /etc/hosts, dnsmasq, aardvark-dns
-                                                             └─ nftables (filter, masquerade)
+                                                             └─ nftables (anti-spoofing, isolation,
+                                                                          filter, masquerade)
 ```
 
 ## Components
@@ -25,6 +26,7 @@ The same plugin also works as a regular CNI plugin for Kubernetes
 |---|---|---|
 | `trestle` | `/usr/libexec/trestle/trestle`, symlinked into `/usr/libexec/netavark` and `/usr/libexec/cni` | Plugin executed by the runtime. Validates arguments, `CNI_*` variables and stdin JSON. Passes the request and (for rootless callers) the netns file descriptor to the daemon, and prints its answer. |
 | `trestled` | `/usr/sbin/trestled`, `trestled.service` | Root daemon. Authorizes the request and does the network work. |
+| `trestlectl` | `/usr/bin/trestlectl` (symlink to the client) | Admin tool: `status`, `list`, `leases`, `gc`, `detach`. |
 | `trestle.conf` | `/etc/trestle/trestle.conf`, `/etc/trestle/conf.d/*.conf` | Permitted networks, users, addressing, DNS and firewall options. |
 
 ## What happens on a request
@@ -52,17 +54,25 @@ The same plugin also works as a regular CNI plugin for Kubernetes
    `interface_name`). Two users can run containers with the same name
    without clashing.
 6. **Addressing** (if `subnet = 10.0.0.1/24`): `10.0.0.1` on the bridge,
-   `10.0.0.2-254` for containers, default route via the bridge.
-7. **Names** (optional): `user.container.network.trestle` in `/etc/hosts`,
+   `10.0.0.2-254` for containers, default route via the bridge. With
+   `ipam = dhcp` (LAN bridges) trestled gets a lease from the LAN's DHCP
+   server for the container's MAC and keeps it renewed.
+7. **Port security** (default `anti_spoofing = yes`): the container may only
+   send with its own MAC and IP; rogue DHCP servers and router
+   advertisements are dropped. Optional `isolation = user | container`
+   separates tenants on a shared bridge.
+8. **Names** (optional): `user.container.network.trestle` in `/etc/hosts`,
    a dnsmasq hosts file, and/or aardvark-dns for Netavark.
 
-8. **Hooks** (optional): per-network `create_script`, `setup_script` and
+9. **Hooks** (optional): per-network `create_script`, `setup_script` and
    `teardown_script` run with `TRESTLE_*` environment variables (network,
    bridge, container id/name, user, interface names, MACs, IP, and the
    container netns as fd 3). See `man trestle.conf` and
    `docs/examples/hook-example.sh`.
 
-Teardown reverses all of this. A bridge is removed only if trestle created
+Teardown reverses all of this. Leftovers from crashes (attachments whose
+veth is gone, orphaned leases) are swept at start, every `gc_interval` and
+with `trestlectl gc`; Kubernetes can also use CNI 1.1.0 `GC` and `STATUS`. A bridge is removed only if trestle created
 it, it has no other ports, and NetworkManager, systemd-networkd and libvirt
 do not claim it.
 
@@ -126,7 +136,7 @@ works on hosts running in FIPS mode.
 
 ## Documentation
 
-* `man trestle`, `man trestled`, `man trestle.conf`
+* `man trestle`, `man trestled`, `man trestlectl`, `man trestle.conf`
 * [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): protocol, state, naming
 * [docs/SECURITY.md](docs/SECURITY.md): threat model and hardening
 * [docs/examples/](docs/examples/)

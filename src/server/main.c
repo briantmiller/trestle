@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../common/config.h"
@@ -26,11 +27,15 @@
 #include "dnsout.h"
 #include "handler.h"
 #include "firewalld.h"
+#include "gc.h"
+#include "keeper.h"
+#include "netlink.h"
 #include "netset.h"
 #include "nft.h"
+#include "state.h"
 
 #ifndef TRESTLE_VERSION
-#define TRESTLE_VERSION "0.1"
+#define TRESTLE_VERSION "0.2"
 #endif
 
 static volatile sig_atomic_t g_stop, g_reload;
@@ -204,6 +209,33 @@ static bool listener_intact(const struct listener *L)
 	return lstat(L->path, &st) == 0 && S_ISSOCK(st.st_mode) && st.st_dev == L->dev && st.st_ino == L->ino;
 }
 
+/* Stale state sweep; the caller holds the state lock. */
+static void run_gc(const struct tr_config *cfg)
+{
+	int nlfd = nl_open();
+	if (nlfd < 0) {
+		log_warn("gc: netlink: %s", strerror(-nlfd));
+		return;
+	}
+	struct gc_filter f = { 0 };
+	struct gc_report rep = { 0 };
+	gc_run(cfg, nlfd, &f, false, &rep);
+	if (rep.removed.n || rep.leases.n || rep.keepers.n)
+		log_info("gc: removed %zu stale attachment(s), released %zu lease(s), restarted %zu DHCP keeper(s)",
+			 rep.removed.n, rep.leases.n, rep.keepers.n);
+	gc_report_free(&rep);
+	close(nlfd);
+}
+
+/* Is path somewhere below dir? */
+static bool socket_in_dir(const char *path, const char *dir)
+{
+	size_t l = strlen(dir);
+	while (l > 1 && dir[l - 1] == '/')
+		l--;
+	return strncmp(path, dir, l) == 0 && path[l] == '/';
+}
+
 static int prepare_runtime(const struct tr_config *cfg)
 {
 	int r = tr_mkdir_p(cfg->state_dir, 0700);
@@ -211,9 +243,28 @@ static int prepare_runtime(const struct tr_config *cfg)
 		log_err("cannot create %s: %s", cfg->state_dir, strerror(-r));
 		return -1;
 	}
-	/* leases and records name users and containers: keep them private */
-	if (chmod(cfg->state_dir, 0700) < 0)
-		log_warn("cannot restrict permissions of %s: %s", cfg->state_dir, strerror(errno));
+	/* leases and records name users and containers: keep them private.
+	 * With the socket inside, others need search (x) permission to reach
+	 * it by name; they still cannot list the directory, every file in it is
+	 * 0600 and every subdirectory 0700. */
+	bool sock_inside = socket_in_dir(cfg->socket_path, cfg->state_dir);
+	if (chmod(cfg->state_dir, sock_inside ? 0711 : 0700) < 0)
+		log_warn("cannot set permissions of %s: %s", cfg->state_dir, strerror(errno));
+	char sdir[PATH_MAX];
+	tr_strlcpy(sdir, cfg->socket_path, sizeof(sdir));
+	char *slash = strrchr(sdir, '/');
+	if (slash && slash != sdir) {
+		*slash = '\0';
+		struct stat st;
+		if (stat(sdir, &st) < 0 && (r = tr_mkdir_p(sdir, sock_inside ? 0711 : 0755)))
+			log_warn("cannot create socket directory %s: %s", sdir, strerror(-r));
+		else if (stat(sdir, &st) == 0 && (st.st_mode & 0002) && !(st.st_mode & S_ISVTX))
+			log_warn("socket directory %s is world writable without the sticky bit: "
+				 "anyone could replace the socket", sdir);
+		else if (stat(sdir, &st) == 0 && (st.st_mode & 0002))
+			log_info("socket directory %s is world writable (sticky): another user can "
+				 "squat the socket path while trestled is stopped", sdir);
+	}
 	if (cfg->ip_forward) {
 		int fd = open("/proc/sys/net/ipv4/ip_forward", O_WRONLY | O_CLOEXEC);
 		if (fd < 0 || write(fd, "1\n", 2) != 2)
@@ -223,8 +274,16 @@ static int prepare_runtime(const struct tr_config *cfg)
 		if (fd >= 0)
 			close(fd);
 	}
+	/* request handlers may be running (reload): the ruleset and DNS outputs
+	 * are built from the records, so hold the state lock */
+	int lock = state_lock(cfg->state_dir, true);
+	if (lock < 0)
+		log_warn("cannot lock the state directory: %s", strerror(errno));
+	run_gc(cfg);
 	nft_apply(cfg);
 	hosts_refresh_all(cfg);
+	if (lock >= 0)
+		close(lock);
 	fwd_bind_all(cfg);   /* re-establish firewalld zones of existing bridges */
 	return 0;
 }
@@ -257,16 +316,18 @@ static void usage(FILE *f)
 int main(int argc, char **argv)
 {
 	const char *cfgpath = TRESTLE_DEFAULT_CONFIG;
-	bool fg = false, debug = false, test = false;
+	bool fg = false, debug = false, test = false, keeper = false;
 	static const struct option opts[] = {
 		{ "config", required_argument, NULL, 'c' }, { "foreground", no_argument, NULL, 'f' },
 		{ "debug", no_argument, NULL, 'd' },        { "test", no_argument, NULL, 't' },
 		{ "version", no_argument, NULL, 'V' },      { "help", no_argument, NULL, 'h' },
+		{ "dhcp-keeper", no_argument, NULL, 'K' },
 		{ 0 }
 	};
 	int c;
 	while ((c = getopt_long(argc, argv, "c:fdtVh", opts, NULL)) != -1) {
 		switch (c) {
+		case 'K': keeper = true; break;
 		case 'c': cfgpath = optarg; break;
 		case 'f': fg = true; break;
 		case 'd': debug = true; break;
@@ -275,6 +336,17 @@ int main(int argc, char **argv)
 		case 'h': usage(stdout); return 0;
 		default: usage(stderr); return 2;
 		}
+	}
+
+	if (keeper) {
+		/* internal: "trestled --dhcp-keeper [-c FILE] NETWORK CONTAINER-ID"
+		 * with the container network namespace on fd 3 (see keeper.h) */
+		if (argc - optind != 2 || geteuid() != 0 || !tr_valid_network_name(argv[optind]) ||
+		    !tr_valid_container_id(argv[optind + 1])) {
+			fprintf(stderr, "trestled: --dhcp-keeper is started by trestled itself\n");
+			return 2;
+		}
+		return keeper_main(cfgpath, argv[optind], argv[optind + 1], debug);
 	}
 
 	tlog_init("trestled", tlog_detect_target(fg), debug ? LOG_DEBUG : LOG_INFO);
@@ -377,7 +449,32 @@ int main(int argc, char **argv)
 
 		reap_children();
 		struct pollfd p = { .fd = L.fd, .events = POLLIN };
-		int r = poll(&p, 1, 30000);
+		/* periodic stale state sweep in a child (it waits for the lock) */
+		static time_t next_gc;
+		time_t now = time(NULL);
+		if (!next_gc)
+			next_gc = now + (cfg.gc_interval ? cfg.gc_interval : 3600);
+		if (cfg.gc_interval && now >= next_gc && g_children < MAX_CHILDREN) {
+			next_gc = now + cfg.gc_interval;
+			pid_t gp = fork();
+			if (gp == 0) {
+				close(L.fd);
+				close(lockfd);
+				signal(SIGTERM, SIG_DFL);
+				signal(SIGHUP, SIG_IGN);
+				signal(SIGCHLD, SIG_DFL);
+				int lk = state_lock(cfg.state_dir, true);
+				if (lk >= 0)
+					run_gc(&cfg);
+				_exit(0);
+			}
+			if (gp > 0)
+				kid_add(gp, (uid_t)-1);
+		}
+		int timeout = 30000;
+		if (cfg.gc_interval && (next_gc - now) * 1000 < timeout)
+			timeout = next_gc > now ? (int)(next_gc - now) * 1000 : 0;
+		int r = poll(&p, 1, timeout);
 		if (r < 0) {
 			if (errno == EINTR)
 				continue;

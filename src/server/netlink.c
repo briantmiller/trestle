@@ -240,12 +240,16 @@ int nl_dump_links(int fd, nl_link_cb cb, void *ctx)
 	return nl_talk(fd, &b.u.n, dump_links_cb, &d);
 }
 
-int nl_create_bridge(int fd, const char *name, int mtu, bool stp, bool vlan_filtering)
+int nl_create_bridge(int fd, const char *name, int mtu, bool stp, bool vlan_filtering, const uint8_t *mac)
 {
 	struct nlb b;
 	struct ifinfomsg ifi = { .ifi_family = AF_UNSPEC };
 	nlm_init(&b, RTM_NEWLINK, NLM_F_CREATE | NLM_F_EXCL, &ifi, sizeof(ifi));
 	nla_put_str(&b, IFLA_IFNAME, name);
+	/* a fixed address: otherwise the bridge takes the lowest port MAC and
+	 * the gateway MAC changes whenever containers come and go */
+	if (mac)
+		nla_put(&b, IFLA_ADDRESS, mac, 6);
 	if (mtu > 0)
 		nla_put_u32(&b, IFLA_MTU, (uint32_t)mtu);
 	struct rtattr *li = nla_nest(&b, IFLA_LINKINFO);
@@ -356,6 +360,19 @@ int nl_addr_add(int fd, int ifindex, uint32_t addr, uint8_t prefix)
 	nla_put(&b, IFA_ADDRESS, &a, 4);
 	if (prefix < 31)
 		nla_put(&b, IFA_BROADCAST, &bc, 4);
+	return nl_talk(fd, &b.u.n, NULL, NULL);
+}
+
+int nl_addr_del(int fd, int ifindex, uint32_t addr, uint8_t prefix)
+{
+	struct nlb b;
+	struct ifaddrmsg ifa = {
+		.ifa_family = AF_INET, .ifa_prefixlen = prefix,
+		.ifa_scope = RT_SCOPE_UNIVERSE, .ifa_index = (unsigned)ifindex,
+	};
+	uint32_t a = htonl(addr);
+	nlm_init(&b, RTM_DELADDR, 0, &ifa, sizeof(ifa));
+	nla_put(&b, IFA_LOCAL, &a, 4);
 	return nl_talk(fd, &b.u.n, NULL, NULL);
 }
 

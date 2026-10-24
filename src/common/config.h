@@ -30,7 +30,10 @@
 #endif
 
 #define TRESTLE_DEFAULT_CONFIG  TRESTLE_SYSCONFDIR "/trestle/trestle.conf"
-#define TRESTLE_DEFAULT_SOCKET  "/tmp/trestle.sock"
+/* in the root-owned state directory: unlike /tmp nobody else can create or
+ * replace a file there (Netavark's private /run hides /run and /var/run, but
+ * not /var/lib) */
+#define TRESTLE_DEFAULT_SOCKET  TRESTLE_LOCALSTATEDIR "/trestle/trestle.sock"
 #define TRESTLE_DEFAULT_CLIENT  TRESTLE_LIBEXECDIR "/trestle/trestle"
 #define TRESTLE_DEFAULT_SERVER  TRESTLE_SBINDIR "/trestled"
 #define TRESTLE_DEFAULT_STATE   TRESTLE_LOCALSTATEDIR "/trestle"
@@ -38,6 +41,7 @@
 enum tr_ipam_mode { TR_PODMAN_IPAM_NONE, TR_PODMAN_IPAM_HOST_LOCAL };
 enum tr_verify_mode { TR_VERIFY_STRICT, TR_VERIFY_RELAXED, TR_VERIFY_NONE };
 enum tr_nm_mode { TR_NM_AUTO, TR_NM_YES, TR_NM_NO };
+enum tr_isolation { TR_ISO_NONE, TR_ISO_USER, TR_ISO_CONTAINER };
 
 struct tr_network {
 	char name[TR_MAX_NAME + 1];
@@ -72,6 +76,17 @@ struct tr_network {
 	struct strv allow_outbound_to; /* CIDRs */
 	struct strv nft_rules;         /* raw rules appended to the network's forward chain */
 	char firewalld_zone[64];       /* put the bridge into this firewalld zone ("" = no) */
+
+	/* port security (nftables bridge table) */
+	bool anti_spoofing;            /* containers may only use their own MAC / IP */
+	bool allow_ipv6;               /* let IPv6 from containers through (MAC checked) */
+	enum tr_isolation isolation;   /* traffic between containers on the bridge */
+
+	/* ipam = dhcp: trestled obtains a lease from the LAN's DHCP server for
+	 * each container and keeps it renewed */
+	bool dhcp;
+	int dhcp_timeout;              /* seconds for the initial lease */
+	bool dhcp_hostname;            /* send the container name (option 12) */
 
 	/* hook scripts */
 	char create_script[PATH_MAX];
@@ -108,11 +123,13 @@ struct tr_config {
 	char server_selinux_type[128];
 
 	/* runtime */
+	char config_path[PATH_MAX];    /* file this configuration was loaded from */
 	char state_dir[PATH_MAX];
 	char hosts_path[PATH_MAX];
 	int log_level;
 	int request_timeout;           /* seconds */
 	int max_requests_per_user;     /* concurrent connections per non-root uid */
+	int gc_interval;               /* seconds between stale state sweeps, 0 = off */
 	bool ip_forward;
 
 	/* nftables */
@@ -167,5 +184,9 @@ bool config_wildcard_instance(const struct tr_config *c, const char *name, struc
 /* Longest time one request may spend in hook scripts (used by the client
  * to size its response timeout). */
 int config_max_script_time(const struct tr_config *c);
+
+/* Longest time one request may wait for a DHCP lease (0 if no network uses
+ * ipam = dhcp). */
+int config_max_dhcp_time(const struct tr_config *c);
 
 #endif

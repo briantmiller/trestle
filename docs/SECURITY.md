@@ -14,8 +14,10 @@ request is treated as hostile until proven otherwise.
 | Namespace ownership | fd must be a netns, not the host netns, and (non-root) owned by a user namespace of the caller | Moving interfaces into the host or another user's container |
 | Ownership of attachments | teardown/DEL/CHECK compare the record's uid | One user detaching another user's container |
 | Naming | veth name includes the user name | Collisions between users |
+| Spoofing between containers | `anti_spoofing` (default on): nftables bridge table binds each port to its MAC and IPv4 address; rogue DHCP servers, IPv6 RA/redirects, VLAN tags and unknown `trv*` ports dropped | A container impersonating another container or the gateway (ARP/IP/MAC spoofing, rogue DHCP) |
+| Tenant separation | `isolation = user \| container` at layer 2 and for routed hairpin traffic | Users reaching each other's containers on a shared bridge |
 | Denial of service | whole request within `request_timeout` (not just each read); at most 64 handlers, `max_requests_per_user` (default 8) per non-root uid | One user keeping all handlers busy with stalled or dripping connections |
-| Server identity (client side) | peer uid root, socket owned by root, `/proc/<pid>/exe` (or process name inside a user namespace), optional SELinux type | A local user squatting `/tmp/trestle.sock` |
+| Server identity (client side) | peer uid root, socket owned by root, `/proc/<pid>/exe` (or process name inside a user namespace), optional SELinux type | A local user squatting the socket path (only possible when `socket` points into a world-writable directory such as `/tmp`) |
 
 ### Input handling rules
 
@@ -46,6 +48,15 @@ request is treated as hostile until proven otherwise.
 * Log messages escape control characters (`\x0a`), so client-supplied text
   cannot forge log lines or journald priority prefixes.
 
+### trestlectl and CNI GC
+
+`trestlectl` is the client binary under another name, so it passes the same
+client binary check. Non-root users may `status` (networks they may use),
+`list` (their own attachments) and `detach` their own containers; `leases`
+and `gc` are root only. CNI GC only ever removes `cni` attachments of the
+calling uid, so the kubelet's GC cannot touch rootless Podman containers on
+the same network.
+
 ### Testing
 
 * `make fuzz` (clang): libFuzzer + ASan/UBSan harnesses for the CNI and
@@ -71,20 +82,29 @@ ownership rules. It stops casual misuse and makes auditing easier, but it is
 not the security boundary on its own. Note also that PIDs can be reused; the
 check happens right after the connection is accepted.
 
-### The socket in /tmp
+### Where the socket lives
 
-Netavark runs plugins with a private `/run`, so the socket must be in `/tmp`.
-Because `/tmp` is world writable:
+Netavark runs plugins with a private `/run` (and so `/var/run`), so the
+socket cannot be there. Since 0.2 it is `/var/lib/trestle/trestle.sock`, in
+the root-owned state directory:
 
-* trestled deletes whatever exists at the path when it starts, and recreates
-  the socket if it disappears or is replaced while running (checked every 30 s);
-* `/tmp` has the sticky bit, so other users cannot remove root's socket;
-* the client refuses a socket that is not served by root;
+* nobody but root can create, replace or remove anything in that directory,
+  so the path cannot be squatted, not even while trestled is stopped;
+* the directory is `0711` (it is `0700` when the socket is configured
+  elsewhere): clients can reach the socket by its name, but cannot list the
+  directory; every file in it is `0600` and every subdirectory `0700`, so
+  leases and records stay private;
+* the daemon's `/tmp` is private (`PrivateTmp=yes`);
 * `socket_group` + `socket_mode = 0770` restrict access to a group;
-* with SELinux, set `server_selinux_type = trestled_t`.
+* the client still refuses a socket that is not served by root by the
+  trestled binary, and with SELinux `server_selinux_type = trestled_t`
+  checks the server's label.
 
-A user could still create `/tmp/trestle.sock` while trestled is stopped. The
-client's server verification then refuses to talk to it.
+The 0.1 location `/tmp/trestle.sock` still works (`socket = /tmp/trestle.sock`
+plus `PrivateTmp=no` in a drop-in for `trestled.service`). There a local user
+could create the file while trestled is stopped; the client's server
+verification then refuses to talk to it, and trestled removes it at start.
+trestled logs a warning when the socket directory is world writable.
 
 ## Hook scripts
 

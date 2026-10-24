@@ -77,8 +77,12 @@ teardown_script = /etc/trestle/hooks/dev.sh
 
 ```sh
 journalctl -u trestled -f
+trestlectl list                     # your containers on trestle networks
+sudo trestlectl status              # networks, attachments, free addresses
+sudo trestlectl gc --dry-run        # leftovers from crashes
 TRESTLE_DEBUG=1 /usr/libexec/trestle/trestle info
 sudo trestled -t      # shows the nftables ruleset that will be loaded
+sudo nft list table bridge trestle  # anti-spoofing / isolation drop counters
 ```
 
 | Message | Meaning |
@@ -86,6 +90,8 @@ sudo trestled -t      # shows the nftables ruleset that will be loaded
 | `network 'x' is not permitted by trestle` | no `[network:x]` section |
 | `user 'u' is not permitted to use network 'x'` | `users` does not match |
 | `host interface trv… already exists` | the same user already runs a container with that name on that network |
-| `refusing to talk to /tmp/trestle.sock` | the socket is not served by trestled (daemon down and someone else created the file?) |
+| `refusing to talk to /var/lib/trestle/trestle.sock` | the socket is not served by trestled (daemon down and someone else created the file?) |
 | `cannot connect to trestled` | daemon not running |
+| container loses connectivity after changing its MAC or adding an address | anti-spoofing: a container may only use the MAC and IP trestle gave it (`anti_spoofing = no` to allow) |
+| `no DHCP lease within 10 s` | `ipam = dhcp`, but no DHCP server answers on the bridge (uplink? `dhcp_timeout`) |
 | containers can't resolve each other (aardvark-dns) | with firewalld, set `firewalld_zone = trusted` for the network; the default zone blocks DNS to the bridge |

@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: GPL-3.0-or-later
-.TH TRESTLE.CONF 5 "October 2026" "trestle 0.1" "File Formats"
+.TH TRESTLE.CONF 5 "October 2026" "trestle 0.2" "File Formats"
 .SH NAME
 trestle.conf \- configuration of the trestle container network plugin
 .SH SYNOPSIS
@@ -17,7 +17,13 @@ Unknown keys are errors. Check a configuration with \fBtrestled \-t\fR.
 .SH [global]
 .TP
 .B socket
-Unix socket path. Default \fI/tmp/trestle.sock\fR.
+Unix socket path. Default \fI/var/lib/trestle/trestle.sock\fR (in the
+root-owned state directory, which is then mode 0711 so clients can reach
+the socket without being able to list the directory). Netavark runs plugins
+with a private \fI/run\fR, so a path there does not work. A path in
+\fI/tmp\fR (the 0.1 default) needs \fBPrivateTmp=no\fR for
+\fBtrestled.service\fR and lets other users squat the path while trestled
+is stopped.
 .TP
 .BR socket_owner ", " socket_group ", " socket_mode
 Ownership and octal mode applied to the socket. Default root, root, 0777.
@@ -58,6 +64,14 @@ Connections one non-root user may have in flight at the same time (1\-64).
 Further connections from that user are closed at once, so one user cannot
 occupy all 64 request handlers. Root is only bound by the global limit.
 Default 8.
+.TP
+.B gc_interval
+Seconds between sweeps for stale state (default 300, \fB0\fR = off, else
+10\-86400): attachments whose host veth no longer exists (host crash, a
+runtime that never called DEL/teardown) are removed with their lease, DNS
+entries and DHCP keeper; leases without an attachment are released; DHCP
+attachments that lost their keeper get a new one. A sweep also runs at
+daemon start and with \fBtrestlectl gc\fR.
 .TP
 .B ip_forward
 Enable net.ipv4.ip_forward at start-up. Default no.
@@ -110,6 +124,29 @@ and never deleted.
 assigned to the bridge, containers get 10.0.0.2\-10.0.0.254 and a default
 route via 10.0.0.1. Without a subnet no addresses are configured. Prefix
 8\-30.
+.TP
+.B ipam
+\fBstatic\fR (default): addresses from \fBsubnet\fR, or none.
+\fBdhcp\fR: for networks on a bridge with a DHCP server (typically a LAN
+bridge with an \fBuplink\fR; the network has no \fBsubnet\fR). trestled
+requests a lease for each container from that server, with the container's
+MAC address (and the container name as host name), configures address,
+default route and DNS servers from the lease and reports them to the
+runtime. A small keeper process per container (\fBtrestled
+\-\-dhcp\-keeper\fR, in its own systemd scope) renews the lease, follows
+address changes and releases the lease when the container is removed;
+keepers survive daemon restarts. The address is used for
+\fBhosts_file\fR/\fBdnsmasq_hosts\fR and anti-spoofing. Not combinable with
+\fBsubnet\fR, \fBmasquerade\fR or \fBaardvark_dns\fR. The DHCP server must
+be reachable on the bridge (with \fBisolation\fR it still is: it is not a
+container).
+.TP
+.B dhcp_timeout
+Seconds to wait for the first lease (default 10, 1\-120). The runtime's
+request fails if no lease arrives.
+.TP
+.B dhcp_hostname
+Send the container name as DHCP host name (option 12). Default yes.
 .TP
 .B mtu
 MTU of the bridge and both veth ends.
@@ -178,6 +215,34 @@ as a container starts (or run \fBsystemctl reload trestled\fR). Before
 trestle deletes a bridge it removes it from the zone. Nothing happens when
 firewalld is not running. Typical values: \fBtrusted\fR (all traffic from
 the containers to the host is accepted) or \fBinternal\fR.
+.TP
+.B anti_spoofing
+Default \fByes\fR. Frames a container sends into the bridge must carry
+the MAC address of its interface, and IPv4 packets and ARP messages its own
+address (from trestle's IPAM or the DHCP lease). Also dropped: DHCP server
+replies, IPv6 router advertisements and redirects, DHCPv6 server traffic
+and VLAN tagged frames from containers, and everything from \fBtrv*\fR
+interfaces trestle does not know. On networks without addressing by
+trestle (no \fBsubnet\fR, no \fBipam = dhcp\fR) only the MAC address and
+those server/router messages are checked. Implemented as nftables table
+\fBbridge\fR \fInft_table\fR, whose sets are rebuilt from the attachment
+records on every change; a port is protected before it is connected to the
+bridge. Changing its MAC or using another address inside the container
+cuts the container off. \fBno\fR restores the 0.1 behaviour.
+.TP
+.B allow_ipv6
+With anti-spoofing, IPv6 from containers is dropped (trestle does not
+manage IPv6 addresses yet). \fByes\fR lets it through (MAC still checked,
+router advertisements still dropped). Default no.
+.TP
+.B isolation
+Traffic between containers on the network. \fBnone\fR (default):
+unrestricted. \fBuser\fR: containers of the same user can reach each
+other, containers of different users cannot. \fBcontainer\fR: no container
+can reach another one. The bridge address (host, aardvark-dns), the uplink
+and everything beyond stay reachable. Enforced on the bridge (layer 2) and
+in the host's forward path, so routing through the host does not get
+around it.
 .TP
 .B create_script
 Script run when the network is created: on \fBpodman network create\fR
@@ -322,7 +387,26 @@ teardown_script = /etc/trestle/hooks/lan.sh
 bridge = br0
 uplink = eno2
 .fi
+.PP
+A multi-tenant network and a LAN bridge addressed by its DHCP server:
+.PP
+.nf
+[network:shared]
+users = @developers
+subnet = 10.50.0.1/24
+isolation = user
+firewall = yes
+masquerade = yes
+
+[network:office]
+users = alice, bob
+bridge = br0
+uplink = eno1
+ipam = dhcp
+hosts_file = yes
+.fi
 .SH SEE ALSO
 .BR trestle (8),
 .BR trestled (8),
+.BR trestlectl (8),
 .BR nft (8)

@@ -272,7 +272,7 @@ out=$(echo "$CNI" | CNI_COMMAND=ADD CNI_CONTAINERID=imp CNI_NETNS=/var/run/netns
 contains "impostor client binary rejected" "$out" "not the trestle client"
 
 out=$(echo '{"cniVersion":"0.4.0"}' | CNI_COMMAND=VERSION "$IT/bin/trestle")
-contains "VERSION answered locally" "$out" '"supportedVersions":["0.3.0","0.3.1","0.4.0","1.0.0"]'
+contains "VERSION answered locally" "$out" '"supportedVersions":["0.3.0","0.3.1","0.4.0","1.0.0","1.1.0"]'
 
 # ---------------------------------------------------------------- Netavark rootless
 say "Netavark (rootless users in user namespaces)"

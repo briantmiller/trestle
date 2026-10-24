@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.2 - 2026-10-24
+
+* **Anti-spoofing** (`anti_spoofing`, default on): an nftables `bridge`
+  table binds every container port to its MAC and IPv4 address; ARP, IP and
+  MAC spoofing, DHCP servers, IPv6 router advertisements/redirects, DHCPv6
+  servers and VLAN tagged frames from containers are dropped, as is traffic
+  from `trv*` ports trestle does not know. `allow_ipv6` lets IPv6 through.
+* **Isolation** (`isolation = none | user | container`): containers of
+  different users (or all containers) cannot reach each other on a shared
+  bridge, at layer 2 and when routed through the host.
+* **Stale state cleanup**: attachments whose veth is gone, orphaned leases
+  and lost DHCP keepers are cleaned up at start, every `gc_interval`
+  (default 300 s) and with `trestlectl gc`.
+* **CNI 1.1.0**: `GC` (`cni.dev/valid-attachments`, limited to the caller's
+  own CNI attachments) and `STATUS` (code 50 when the daemon is down or the
+  pool is exhausted).
+* **trestlectl**: `status`, `list`, `leases`, `gc [--dry-run]`, `detach`,
+  `--json`.
+* **ipam = dhcp**: containers on LAN bridges get their address from the LAN
+  DHCP server; trestled acts as the client for the container's MAC and a
+  keeper process renews and releases the lease.
+* The socket moved from `/tmp/trestle.sock` to
+  `/var/lib/trestle/trestle.sock` (root-owned directory, now `0711`), so
+  it can no longer be squatted; `trestled.service` uses `PrivateTmp=yes`.
+  `socket = /tmp/trestle.sock` (with `PrivateTmp=no`) still works. SELinux
+  type `trestle_tmp_t` is now `trestle_sock_t`.
+* Bridges trestle creates get a fixed MAC address, so the gateway MAC no
+  longer changes when containers come and go.
+* `make fuzz` gains a DHCP parser target; new `tests/integration/features.sh`.
+
 ## 0.1 - 2026-10-23
 
 Initial release.

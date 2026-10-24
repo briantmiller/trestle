@@ -18,7 +18,7 @@ static void test_defaults(void)
 {
 	struct tr_config c;
 	config_defaults(&c);
-	CHECK_STR(c.socket_path, "/tmp/trestle.sock");
+	CHECK_STR(c.socket_path, TRESTLE_LOCALSTATEDIR "/trestle/trestle.sock");
 	CHECK_STR(c.socket_owner, "root");
 	CHECK_STR(c.socket_group, "root");
 	CHECK(c.socket_mode == 0777);
@@ -203,8 +203,55 @@ static void test_wildcard(void)
 	}
 }
 
+static void test_port_security_options(void)
+{
+	struct tr_config c;
+	char err[256];
+	config_defaults(&c);
+	CHECK(c.gc_interval == 300);
+	/* the socket lives in the root-owned state directory, not in /tmp */
+	CHECK_STR(c.socket_path, TRESTLE_LOCALSTATEDIR "/trestle/trestle.sock");
+	CHECK(strncmp(c.socket_path, c.state_dir, strlen(c.state_dir)) == 0);
+	CHECK(config_parse_text(&c, "[global]\ngc_interval=0\n[network:a]\nusers=*\nsubnet=10.0.0.1/24\n"
+				"isolation=user\nanti_spoofing=no\nallow_ipv6=yes\n"
+				"[network:lan]\nusers=*\nbridge=br0\nipam=dhcp\ndhcp_timeout=20\ndhcp_hostname=no\nhosts_file=yes\n",
+				"t", err, sizeof(err)) == 0);
+	CHECK(config_finalize(&c, err, sizeof(err)) == 0);
+	CHECK(c.gc_interval == 0);
+	const struct tr_network *a = config_find_network(&c, "a"), *l = config_find_network(&c, "lan");
+	CHECK(a && a->isolation == TR_ISO_USER && !a->anti_spoofing && a->allow_ipv6);
+	CHECK(l && l->dhcp && l->dhcp_timeout == 20 && !l->dhcp_hostname && l->anti_spoofing);
+	CHECK(l->isolation == TR_ISO_NONE);
+	CHECK(config_max_dhcp_time(&c) == 20);
+	config_free(&c);
+
+	static const char *bad[] = {
+		"[network:a]\nisolation=tenant\n",
+		"[network:a]\nipam=host-local\n",
+		"[network:a]\ndhcp_timeout=0\n",
+		"[global]\ngc_interval=5\n",
+	};
+	for (size_t i = 0; i < sizeof(bad) / sizeof(*bad); i++) {
+		config_defaults(&c);
+		CHECK(config_parse_text(&c, bad[i], "t", err, sizeof(err)) < 0);
+		config_free(&c);
+	}
+	static const char *badfin[] = {
+		"[network:a]\nusers=*\nipam=dhcp\nsubnet=10.0.0.1/24\n",
+		"[network:a]\nusers=*\nipam=dhcp\nmasquerade=yes\n",
+		"[network:a]\nusers=*\nipam=dhcp\naardvark_dns=yes\n",
+	};
+	for (size_t i = 0; i < sizeof(badfin) / sizeof(*badfin); i++) {
+		config_defaults(&c);
+		CHECK(config_parse_text(&c, badfin[i], "t", err, sizeof(err)) == 0);
+		CHECK(config_finalize(&c, err, sizeof(err)) < 0);
+		config_free(&c);
+	}
+}
+
 int main(void)
 {
+	RUN(test_port_security_options);
 	tlog_init("test", TLOG_STDERR, LOG_ERR);
 	RUN(test_defaults);
 	RUN(test_full);

@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <limits.h>
 #include <unistd.h>
 
@@ -20,15 +22,18 @@
 #include "../common/request.h"
 #include "bridge.h"
 #include "checks.h"
+#include "dhcp.h"
 #include "dnsout.h"
+#include "gc.h"
 #include "hooks.h"
+#include "keeper.h"
 #include "netset.h"
 #include "nft.h"
 #include "netlink.h"
 #include "state.h"
 
 #ifndef TRESTLE_VERSION
-#define TRESTLE_VERSION "0.1"
+#define TRESTLE_VERSION "0.2"
 #endif
 
 struct hctx {
@@ -119,8 +124,9 @@ static int decode_request(struct hctx *h, const char *wire)
 		json_object_put(w);
 		return failf(h, CNI_ERR_DECODE, "malformed request");
 	}
-	h->mode = strcmp(json_object_get_string(mode), "cni") == 0 ? TR_MODE_CNI : TR_MODE_NETAVARK;
-	if (strcmp(json_object_get_string(mode), "cni") && strcmp(json_object_get_string(mode), "netavark")) {
+	const char *ms = json_object_get_string(mode);
+	h->mode = !strcmp(ms, "cni") ? TR_MODE_CNI : !strcmp(ms, "admin") ? TR_MODE_ADMIN : TR_MODE_NETAVARK;
+	if (strcmp(ms, "cni") && strcmp(ms, "netavark") && strcmp(ms, "admin")) {
 		json_object_put(w);
 		return failf(h, CNI_ERR_DECODE, "unknown mode");
 	}
@@ -136,7 +142,7 @@ static int decode_request(struct hctx *h, const char *wire)
 		rc = tr_parse_cni(json_env_lookup, env, stdin_text, &h->req, h->err, sizeof(h->err), &h->cni_code);
 	} else {
 		size_t n = json_object_array_length(argv);
-		if (n < 2 || n > 8) {
+		if (n < 2 || n > 8 || (h->mode == TR_MODE_ADMIN && (*stdin_text || json_object_get_boolean(nsfd)))) {
 			json_object_put(w);
 			return failf(h, CNI_ERR_DECODE, "invalid argument vector");
 		}
@@ -149,7 +155,10 @@ static int decode_request(struct hctx *h, const char *wire)
 			}
 			args[i - 1] = (char *)json_object_get_string(a);
 		}
-		rc = tr_parse_netavark((int)n - 1, args, stdin_text, &h->req, h->err, sizeof(h->err));
+		if (h->mode == TR_MODE_ADMIN)
+			rc = tr_parse_admin((int)n - 1, args, &h->req, h->err, sizeof(h->err));
+		else
+			rc = tr_parse_netavark((int)n - 1, args, stdin_text, &h->req, h->err, sizeof(h->err));
 		h->cni_code = CNI_ERR_INVALID_CONFIG;
 	}
 	if (rc == 0 && strcmp(h->req.command, json_object_get_string(cmd)) != 0)
@@ -250,10 +259,12 @@ static int run_create_hook(struct hctx *h, bool bridge_created, const char *podm
 static char *build_add_output(struct hctx *h, const struct tr_attachment *a, const char *host_mac)
 {
 	const struct tr_network *n = h->net;
-	char ip[16], gw[16], ipnet[24];
+	char ip[16], gw[16] = "", ipnet[24];
+	uint32_t gwa = a->dhcp ? a->gateway : n->gateway;
 	if (a->has_ip) {
 		tr_fmt_ipv4(a->ip, ip);
-		tr_fmt_ipv4(n->gateway, gw);
+		if (gwa)
+			tr_fmt_ipv4(gwa, gw);
 		snprintf(ipnet, sizeof(ipnet), "%s/%u", ip, a->prefix);
 	}
 
@@ -278,18 +289,31 @@ static char *build_add_output(struct hctx *h, const struct tr_attachment *a, con
 			if (legacy)
 				json_object_object_add(e, "version", json_object_new_string("4"));
 			json_object_object_add(e, "address", json_object_new_string(ipnet));
-			json_object_object_add(e, "gateway", json_object_new_string(gw));
+			if (gw[0])
+				json_object_object_add(e, "gateway", json_object_new_string(gw));
 			json_object_object_add(e, "interface", json_object_new_int(1));
 			json_object_array_add(ips, e);
 			json_object_object_add(o, "ips", ips);
-			json_object *routes = json_object_new_array();
-			json_object *rt = json_object_new_object();
-			json_object_object_add(rt, "dst", json_object_new_string("0.0.0.0/0"));
-			json_object_object_add(rt, "gw", json_object_new_string(gw));
-			json_object_array_add(routes, rt);
-			json_object_object_add(o, "routes", routes);
+			if (gw[0]) {
+				json_object *routes = json_object_new_array();
+				json_object *rt = json_object_new_object();
+				json_object_object_add(rt, "dst", json_object_new_string("0.0.0.0/0"));
+				json_object_object_add(rt, "gw", json_object_new_string(gw));
+				json_object_array_add(routes, rt);
+				json_object_object_add(o, "routes", routes);
+			}
 		}
-		json_object_object_add(o, "dns", json_object_new_object());
+		json_object *dns = json_object_new_object();
+		if (a->dns[0]) {
+			json_object *ns = json_object_new_array();
+			for (int i = 0; i < 3 && a->dns[i]; i++) {
+				char d[16];
+				tr_fmt_ipv4(a->dns[i], d);
+				json_object_array_add(ns, json_object_new_string(d));
+			}
+			json_object_object_add(dns, "nameservers", ns);
+		}
+		json_object_object_add(o, "dns", dns);
 		return to_json(o);
 	}
 
@@ -299,6 +323,12 @@ static char *build_add_output(struct hctx *h, const struct tr_attachment *a, con
 	if (n->aardvark_dns && a->has_ip) {
 		json_object_array_add(search, json_object_new_string("dns.podman"));
 		json_object_array_add(servers, json_object_new_string(gw));
+	} else if (a->dhcp) {
+		for (int i = 0; i < 3 && a->dns[i]; i++) {
+			char d[16];
+			tr_fmt_ipv4(a->dns[i], d);
+			json_object_array_add(servers, json_object_new_string(d));
+		}
 	}
 	json_object_object_add(o, "dns_search_domains", search);
 	json_object_object_add(o, "dns_server_ips", servers);
@@ -309,7 +339,8 @@ static char *build_add_output(struct hctx *h, const struct tr_attachment *a, con
 	if (a->has_ip) {
 		json_object *s = json_object_new_object();
 		json_object_object_add(s, "ipnet", json_object_new_string(ipnet));
-		json_object_object_add(s, "gateway", json_object_new_string(gw));
+		if (gw[0])
+			json_object_object_add(s, "gateway", json_object_new_string(gw));
 		json_object_array_add(subs, s);
 	}
 	json_object_object_add(ifo, "subnets", subs);
@@ -318,14 +349,28 @@ static char *build_add_output(struct hctx *h, const struct tr_attachment *a, con
 	return to_json(o);
 }
 
+/* nftables port security must be in place before a port carries traffic */
+static bool net_needs_nft(const struct tr_network *n)
+{
+	return n->anti_spoofing || n->isolation != TR_ISO_NONE;
+}
+
+static int publish_ports(struct hctx *h)
+{
+	if (nft_apply(h->cfg) == 0 || !net_needs_nft(h->net))
+		return 0;
+	return failf(h, CNI_ERR_PLUGIN, "cannot load the nftables port security rules for network %s "
+		     "(anti_spoofing / isolation); see the trestled log", h->net->name);
+}
+
 static int do_attach(struct hctx *h, char **out)
 {
 	const struct tr_config *cfg = h->cfg;
 	const struct tr_network *n = h->net;
 	struct tr_attachment a;
 	struct tr_attachment existing;
-	int nlc = -1, r;
-	bool veth_created = false, ip_taken = false;
+	int nlc = -1, dsock = -1, r;
+	bool veth_created = false, ip_taken = false, saved = false;
 
 	memset(&a, 0, sizeof(a));
 	if (get_netns(h) < 0)
@@ -357,6 +402,12 @@ static int do_attach(struct hctx *h, char **out)
 	tr_veth_name(n->name, h->peer.user, h->req.container_name, a.veth);
 	for (size_t i = 0; i < h->req.aliases.n; i++)
 		strv_push(&a.aliases, h->req.aliases.v[i]);
+	a.dhcp = n->dhcp;
+	struct stat nst;
+	if (fstat(h->nsfd, &nst) == 0) {
+		a.ns_dev = (unsigned long long)nst.st_dev;
+		a.ns_ino = (unsigned long long)nst.st_ino;
+	}
 
 	struct nl_link l;
 	r = nl_get_link(h->nlfd, a.veth, &l);
@@ -377,7 +428,8 @@ static int do_attach(struct hctx *h, char **out)
 		a.has_ip = true;
 		a.prefix = n->prefix;
 	} else if (h->req.static_ips.n) {
-		failf(h, CNI_ERR_INVALID_CONFIG, "static IPs requested but network %s has no subnet configured", n->name);
+		failf(h, CNI_ERR_INVALID_CONFIG, "static IPs requested but network %s %s", n->name,
+		      n->dhcp ? "gets its addresses from DHCP" : "has no subnet configured");
 		goto fail;
 	}
 
@@ -400,9 +452,7 @@ static int do_attach(struct hctx *h, char **out)
 	}
 	char alias[256];
 	tr_veth_alias(n->name, h->peer.user, a.container_name, alias, sizeof(alias));
-	if ((r = nl_set_alias(h->nlfd, l.ifindex, alias)) ||
-	    (r = nl_set_master(h->nlfd, l.ifindex, br)) ||
-	    (r = nl_set_up(h->nlfd, l.ifindex, true))) {
+	if ((r = nl_set_alias(h->nlfd, l.ifindex, alias))) {
 		failf(h, CNI_ERR_PLUGIN, "cannot configure %s: %s", a.veth, strerror(-r));
 		goto fail;
 	}
@@ -410,7 +460,7 @@ static int do_attach(struct hctx *h, char **out)
 	if (l.has_mac)
 		mac_fmt(l.mac, host_mac);
 
-	/* configure the container side */
+	/* the container side: its MAC is what the port may send from */
 	nlc = netns_nl_open(h->nsfd, h->err, sizeof(h->err));
 	if (nlc < 0) {
 		h->cni_code = CNI_ERR_PLUGIN;
@@ -424,6 +474,21 @@ static int do_attach(struct hctx *h, char **out)
 	}
 	if (c.has_mac)
 		mac_fmt(c.mac, a.mac);
+
+	/* record first, then the port security rules built from the records,
+	 * and only then is the port connected to the bridge */
+	if ((r = state_save(cfg->state_dir, &a))) {
+		failf(h, CNI_ERR_IO, "cannot save state: %s", strerror(-r));
+		goto fail;
+	}
+	saved = true;
+	if (publish_ports(h) < 0)
+		goto fail;
+
+	if ((r = nl_set_master(h->nlfd, l.ifindex, br)) || (r = nl_set_up(h->nlfd, l.ifindex, true))) {
+		failf(h, CNI_ERR_PLUGIN, "cannot configure %s: %s", a.veth, strerror(-r));
+		goto fail;
+	}
 	if ((r = nl_set_up(nlc, c.ifindex, true))) {
 		failf(h, CNI_ERR_PLUGIN, "cannot bring up %s in container: %s", a.ifname, strerror(-r));
 		goto fail;
@@ -438,13 +503,50 @@ static int do_attach(struct hctx *h, char **out)
 			goto fail;
 		}
 	}
+
+	if (n->dhcp) {
+		/* lease from the LAN's DHCP server, for the container's MAC */
+		uint8_t cmac[6];
+		struct dhcp_lease lease;
+		char host[64] = "";
+		if (!tr_valid_mac(a.mac, cmac)) {
+			failf(h, CNI_ERR_PLUGIN, "container interface %s has no MAC address", a.ifname);
+			goto fail;
+		}
+		if (n->dhcp_hostname)
+			dhcp_hostname(a.container_name, host, sizeof(host));
+		dsock = dhcp_socket(h->nsfd, a.ifname, h->err, sizeof(h->err));
+		if (dsock < 0 ||
+		    dhcp_acquire(dsock, cmac, host, n->dhcp_timeout * 1000, &lease, h->err, sizeof(h->err)) < 0) {
+			h->cni_code = CNI_ERR_TRY_AGAIN;
+			goto fail;
+		}
+		close(dsock);
+		dsock = -1;
+		if (keeper_configure(nlc, a.ifname, 0, 0, lease.ip, lease.prefix, lease.router,
+				     h->err, sizeof(h->err)) < 0) {
+			h->cni_code = CNI_ERR_PLUGIN;
+			goto fail;
+		}
+		a.has_ip = true;
+		a.ip = lease.ip;
+		a.prefix = lease.prefix;
+		a.gateway = lease.router;
+		memcpy(a.dns, lease.dns, sizeof(a.dns));
+		a.dhcp_server = lease.server;
+		a.lease_expiry = (long long)time(NULL) + lease.lease_time;
+		if ((r = state_save(cfg->state_dir, &a))) {
+			failf(h, CNI_ERR_IO, "cannot save state: %s", strerror(-r));
+			goto fail;
+		}
+		if (publish_ports(h) < 0)
+			goto fail;
+		if (keeper_start(cfg, &a, h->nsfd) < 0)
+			log_warn("cannot start the DHCP keeper for %s; the lease will not be renewed", a.veth);
+	}
 	close(nlc);
 	nlc = -1;
 
-	if ((r = state_save(cfg->state_dir, &a))) {
-		failf(h, CNI_ERR_IO, "cannot save state: %s", strerror(-r));
-		goto fail;
-	}
 	dns_refresh(cfg, n);
 
 	if (n->setup_script[0]) {
@@ -461,12 +563,16 @@ static int do_attach(struct hctx *h, char **out)
 		hi.netns_fd = h->nsfd;
 		if (run_hook(h, n->setup_script, &hi, true) < 0) {
 			/* undo the attachment: the container must not run half set up */
+			if (a.dhcp)
+				keeper_stop(cfg, a.veth);
 			state_delete(cfg->state_dir, n->name, a.container_id);
+			saved = false;
 			if (nl_get_link(h->nlfd, a.veth, &l) == 0)
 				nl_del_link(h->nlfd, l.ifindex);
 			veth_created = false;
 			ipam_release(cfg->state_dir, n->name, a.container_id);
 			ip_taken = false;
+			nft_apply(cfg);
 			dns_refresh(cfg, n);
 			bridge_maybe_remove(h->nlfd, cfg, n);
 			goto fail;
@@ -476,21 +582,27 @@ static int do_attach(struct hctx *h, char **out)
 	char ipbuf[16] = "-";
 	if (a.has_ip)
 		tr_fmt_ipv4(a.ip, ipbuf);
-	log_info("%s %s: user %s container %s (%.12s) attached to %s via %s/%s ip %s",
+	log_info("%s %s: user %s container %s (%.12s) attached to %s via %s/%s ip %s%s",
 		 a.mode, h->req.command, a.user, a.container_name, a.container_id, n->bridge,
-		 a.veth, a.ifname, ipbuf);
+		 a.veth, a.ifname, ipbuf, a.dhcp ? " (DHCP)" : "");
 
 	*out = build_add_output(h, &a, host_mac);
 	attachment_free(&a);
 	return 0;
 
 fail:
+	if (dsock >= 0)
+		close(dsock);
 	if (nlc >= 0)
 		close(nlc);
 	if (veth_created && nl_get_link(h->nlfd, a.veth, &l) == 0)
 		nl_del_link(h->nlfd, l.ifindex);
 	if (ip_taken)
 		ipam_release(cfg->state_dir, n->name, a.container_id);
+	if (saved) {
+		state_delete(cfg->state_dir, n->name, a.container_id);
+		nft_apply(cfg);
+	}
 	attachment_free(&a);
 	return -1;
 }
@@ -543,6 +655,10 @@ static int do_detach(struct hctx *h)
 		run_hook(h, n->teardown_script, &hi, false);
 	}
 
+	/* the DHCP keeper gives the lease back while the interface exists */
+	if (have_rec && a.dhcp)
+		keeper_stop(cfg, a.veth);
+
 	if (have_link) {
 		struct nl_link br;
 		bool ours = strncmp(l.alias, "trestle:", 8) == 0 && !strcmp(l.kind, "veth");
@@ -563,6 +679,7 @@ static int do_detach(struct hctx *h)
 	}
 	if (have_rec)
 		attachment_free(&a);
+	nft_apply(cfg);
 	dns_refresh(cfg, n);
 	bridge_maybe_remove(h->nlfd, cfg, n);
 	log_info("%s %s: user %s container %s (%.12s) detached from %s",
@@ -685,6 +802,270 @@ static int do_create(struct hctx *h, char **out)
 	return 0;
 }
 
+/* ---- CNI GC and STATUS (CNI 1.1.0) ---------------------------------- */
+
+static int count_lease(uint32_t ip, const char *owner, void *ctx)
+{
+	(void)ip;
+	(void)owner;
+	(*(long *)ctx)++;
+	return 0;
+}
+
+/* Free addresses of a static IPAM network, or -1 if trestle does not
+ * allocate addresses there. */
+static long free_addresses(const struct tr_config *cfg, const struct tr_network *n)
+{
+	if (!n->has_subnet)
+		return -1;
+	long size = (1L << (32 - n->prefix)) - 3;   /* network, broadcast, bridge */
+	long used = 0;
+	ipam_foreach(cfg->state_dir, n->name, count_lease, &used);
+	return size > used ? size - used : 0;
+}
+
+static int do_cni_status(struct hctx *h)
+{
+	if (free_addresses(h->cfg, h->net) == 0)
+		return failf(h, CNI_ERR_NOT_AVAILABLE, "network %s has no free addresses", h->net->name);
+	return 0;
+}
+
+static int do_cni_gc(struct hctx *h)
+{
+	struct gc_filter f = { .network = h->net->name, .cni = true, .uid = h->peer.uid,
+			       .valid = &h->req.valid_attachments };
+	struct gc_report rep = { 0 };
+	gc_run(h->cfg, h->nlfd, &f, false, &rep);
+	log_info("cni GC on %s by %s: %zu stale attachment(s) removed", h->net->name, h->peer.user, rep.removed.n);
+	int rc = rep.errors ? failf(h, CNI_ERR_PLUGIN, "GC finished with %d error(s); see the trestled log", rep.errors) : 0;
+	gc_report_free(&rep);
+	return rc;
+}
+
+/* ---- trestlectl ------------------------------------------------------ */
+
+static json_object *jstrv(const struct strv *v)
+{
+	json_object *a = json_object_new_array();
+	for (size_t i = 0; i < v->n; i++)
+		json_object_array_add(a, json_object_new_string(v->v[i]));
+	return a;
+}
+
+static const char *iso_name(enum tr_isolation i)
+{
+	return i == TR_ISO_USER ? "user" : i == TR_ISO_CONTAINER ? "container" : "none";
+}
+
+struct list_ctx {
+	struct hctx *h;
+	json_object *arr;
+	long count;
+};
+
+static int list_cb(const struct tr_attachment *a, void *ctx)
+{
+	struct list_ctx *c = ctx;
+	c->count++;
+	if (!c->arr || (c->h->peer.uid != 0 && a->uid != c->h->peer.uid))
+		return 0;
+	json_object *o = json_object_new_object();
+	char ip[24], s[16];
+	struct nl_link l;
+	json_object_object_add(o, "network", json_object_new_string(a->network));
+	json_object_object_add(o, "container_id", json_object_new_string(a->container_id));
+	json_object_object_add(o, "container_name", json_object_new_string(a->container_name));
+	json_object_object_add(o, "user", json_object_new_string(a->user));
+	json_object_object_add(o, "uid", json_object_new_int64(a->uid));
+	json_object_object_add(o, "mode", json_object_new_string(a->mode));
+	json_object_object_add(o, "ifname", json_object_new_string(a->ifname));
+	json_object_object_add(o, "veth", json_object_new_string(a->veth));
+	json_object_object_add(o, "mac", json_object_new_string(a->mac));
+	if (a->has_ip) {
+		tr_fmt_ipv4(a->ip, s);
+		snprintf(ip, sizeof(ip), "%s/%u", s, a->prefix);
+		json_object_object_add(o, "ip", json_object_new_string(ip));
+	} else {
+		json_object_object_add(o, "ip", NULL);
+	}
+	json_object_object_add(o, "dhcp", json_object_new_boolean(a->dhcp));
+	if (a->dhcp) {
+		json_object_object_add(o, "lease_expiry", json_object_new_int64(a->lease_expiry));
+		json_object_object_add(o, "keeper", json_object_new_boolean(keeper_running(c->h->cfg, a->veth)));
+	}
+	json_object_object_add(o, "present", json_object_new_boolean(nl_get_link(c->h->nlfd, a->veth, &l) == 0));
+	json_object_array_add(c->arr, o);
+	return 0;
+}
+
+static int lease_list_cb(uint32_t ip, const char *owner, void *ctx)
+{
+	struct list_ctx *c = ctx;
+	json_object *o = json_object_new_object();
+	char s[16];
+	tr_fmt_ipv4(ip, s);
+	json_object_object_add(o, "network", json_object_new_string(c->h->req.network));
+	json_object_object_add(o, "ip", json_object_new_string(s));
+	json_object_object_add(o, "container_id", json_object_new_string(owner));
+	struct tr_attachment a;
+	bool att = state_load(c->h->cfg->state_dir, c->h->req.network, owner, &a) == 0;
+	if (att)
+		attachment_free(&a);
+	json_object_object_add(o, "attached", json_object_new_boolean(att));
+	json_object_array_add(c->arr, o);
+	return 0;
+}
+
+/* networks to report: -n NET, else every known network (configured,
+ * created from [network:*], or with state left) */
+static void admin_networks(struct hctx *h, struct strv *names)
+{
+	if (h->req.network[0]) {
+		strv_push(names, h->req.network);
+		return;
+	}
+	struct netset ns;
+	netset_load(h->cfg, &ns);
+	for (size_t i = 0; i < ns.n; i++)
+		strv_push(names, ns.all[i]->name);
+	netset_free(&ns);
+	state_networks(h->cfg->state_dir, names);
+}
+
+static int do_admin(struct hctx *h, char **out)
+{
+	const struct tr_config *cfg = h->cfg;
+	bool root = h->peer.uid == 0;
+	json_object *o = json_object_new_object();
+	struct strv names = { 0 };
+	int rc = 0;
+
+	switch (h->req.cmd) {
+	case TR_CMD_ADM_STATUS: {
+		json_object_object_add(o, "version", json_object_new_string(TRESTLE_VERSION));
+		json_object_object_add(o, "gc_interval", json_object_new_int(cfg->gc_interval));
+		json_object *arr = json_object_new_array();
+		admin_networks(h, &names);
+		for (size_t i = 0; i < names.n; i++) {
+			struct tr_network storage;
+			const struct tr_network *n;
+			char why[128], err[256];
+			if (net_resolve(cfg, names.v[i], false, &storage, &n, NULL, err, sizeof(err)) != 0)
+				continue;
+			if (!root && !acl_allowed(&n->users, &h->peer, why, sizeof(why)))
+				continue;
+			json_object *e = json_object_new_object();
+			json_object_object_add(e, "name", json_object_new_string(n->name));
+			json_object_object_add(e, "bridge", json_object_new_string(n->bridge));
+			if (n->has_subnet) {
+				char gw[16], sn[24];
+				tr_fmt_ipv4(n->gateway, gw);
+				snprintf(sn, sizeof(sn), "%s/%u", gw, n->prefix);
+				json_object_object_add(e, "subnet", json_object_new_string(sn));
+			} else {
+				json_object_object_add(e, "subnet", NULL);
+			}
+			json_object_object_add(e, "ipam", json_object_new_string(n->dhcp ? "dhcp" : n->has_subnet ? "static" : "none"));
+			json_object_object_add(e, "anti_spoofing", json_object_new_boolean(n->anti_spoofing));
+			json_object_object_add(e, "isolation", json_object_new_string(iso_name(n->isolation)));
+			struct list_ctx c = { .h = h };
+			state_foreach(cfg->state_dir, n->name, list_cb, &c);
+			json_object_object_add(e, "attachments", json_object_new_int64(c.count));
+			long fr = free_addresses(cfg, n);
+			json_object_object_add(e, "free_addresses", fr < 0 ? NULL : json_object_new_int64(fr));
+			struct nl_link l;
+			json_object_object_add(e, "bridge_present", json_object_new_boolean(nl_get_link(h->nlfd, n->bridge, &l) == 0));
+			json_object_array_add(arr, e);
+		}
+		json_object_object_add(o, "networks", arr);
+		break;
+	}
+	case TR_CMD_ADM_LIST: {
+		json_object *arr = json_object_new_array();
+		admin_networks(h, &names);
+		for (size_t i = 0; i < names.n; i++) {
+			struct list_ctx c = { .h = h, .arr = arr };
+			state_foreach(cfg->state_dir, names.v[i], list_cb, &c);
+		}
+		json_object_object_add(o, "attachments", arr);
+		break;
+	}
+	case TR_CMD_ADM_LEASES: {
+		if (!root) {
+			rc = failf(h, CNI_ERR_PLUGIN, "only root can list leases");
+			break;
+		}
+		json_object *arr = json_object_new_array();
+		admin_networks(h, &names);
+		char keep[TR_MAX_NAME + 1];
+		tr_strlcpy(keep, h->req.network, sizeof(keep));
+		for (size_t i = 0; i < names.n; i++) {
+			tr_strlcpy(h->req.network, names.v[i], sizeof(h->req.network));
+			struct list_ctx c = { .h = h, .arr = arr };
+			ipam_foreach(cfg->state_dir, names.v[i], lease_list_cb, &c);
+		}
+		tr_strlcpy(h->req.network, keep, sizeof(h->req.network));
+		json_object_object_add(o, "leases", arr);
+		break;
+	}
+	case TR_CMD_ADM_GC: {
+		if (!root) {
+			rc = failf(h, CNI_ERR_PLUGIN, "only root can run gc");
+			break;
+		}
+		struct gc_filter f = { .network = h->req.network[0] ? h->req.network : NULL };
+		struct gc_report rep = { 0 };
+		gc_run(cfg, h->nlfd, &f, h->req.adm_dry_run, &rep);
+		json_object_object_add(o, "dry_run", json_object_new_boolean(h->req.adm_dry_run));
+		json_object_object_add(o, "removed", jstrv(&rep.removed));
+		json_object_object_add(o, "leases", jstrv(&rep.leases));
+		json_object_object_add(o, "keepers", jstrv(&rep.keepers));
+		json_object_object_add(o, "errors", json_object_new_int(rep.errors));
+		log_info("trestlectl gc%s by %s: %zu attachment(s), %zu lease(s)", h->req.adm_dry_run ? " --dry-run" : "",
+			 h->peer.user, rep.removed.n, rep.leases.n);
+		gc_report_free(&rep);
+		break;
+	}
+	case TR_CMD_ADM_DETACH: {
+		struct tr_attachment a;
+		if (net_resolve(cfg, h->req.network, false, &h->net_storage, &h->net, NULL, h->err, sizeof(h->err)) != 0) {
+			/* network gone from the configuration: a sweep cleans it up */
+			rc = failf(h, CNI_ERR_PLUGIN, "network %s is not configured; use trestlectl gc", h->req.network);
+			break;
+		}
+		if (state_load(cfg->state_dir, h->req.network, h->req.container_id, &a) != 0) {
+			rc = failf(h, CNI_ERR_UNKNOWN_CONTAINER, "container %s is not attached to network %s",
+				   h->req.container_id, h->req.network);
+			break;
+		}
+		if (!root && a.uid != h->peer.uid) {
+			attachment_free(&a);
+			rc = failf(h, CNI_ERR_PLUGIN, "container %s on network %s belongs to another user",
+				   h->req.container_id, h->req.network);
+			break;
+		}
+		tr_strlcpy(h->req.container_name, a.container_name, sizeof(h->req.container_name));
+		attachment_free(&a);
+		rc = do_detach(h);
+		if (rc == 0) {
+			char what[256];
+			snprintf(what, sizeof(what), "%s %s", h->req.network, h->req.container_id);
+			json_object_object_add(o, "detached", json_object_new_string(what));
+		}
+		break;
+	}
+	default:
+		rc = failf(h, CNI_ERR_INVALID_ENV, "unsupported command");
+	}
+	strv_clear(&names);
+	if (rc == 0)
+		*out = to_json(o);
+	else
+		json_object_put(o);
+	return rc;
+}
+
 /* ---- entry point ----------------------------------------------------- */
 
 void handle_connection(const struct tr_config *cfg, int sock)
@@ -724,6 +1105,23 @@ void handle_connection(const struct tr_config *cfg, int sock)
 		  (int)h.peer.pid, (unsigned)h.peer.uid, h.peer.user,
 		  h.mode == TR_MODE_CNI ? "cni" : "netavark", h.req.command, h.rootless, h.nsfd >= 0);
 
+	if (h.mode == TR_MODE_ADMIN) {
+		bool changes = h.req.cmd == TR_CMD_ADM_GC || h.req.cmd == TR_CMD_ADM_DETACH;
+		if (changes && (lockfd = state_lock(cfg->state_dir, true)) < 0) {
+			failf(&h, CNI_ERR_IO, "cannot lock the state directory: %s", strerror(errno));
+			goto error;
+		}
+		h.nlfd = nl_open();
+		if (h.nlfd < 0) {
+			failf(&h, CNI_ERR_IO, "netlink: %s", strerror(-h.nlfd));
+			goto error;
+		}
+		if (do_admin(&h, &out) < 0)
+			goto error;
+		respond(&h, 0, out);
+		goto done;
+	}
+
 	/* 1. the network must be configured and the user permitted */
 	/* explicit [network:NAME] section, else the [network:*] catch-all */
 	r = net_resolve(cfg, h.req.network, false, &h.net_storage, &h.net, NULL, h.err, sizeof(h.err));
@@ -762,7 +1160,7 @@ void handle_connection(const struct tr_config *cfg, int sock)
 			h.cni_code = CNI_ERR_PLUGIN;
 			goto error;
 		}
-		if (created && (h.net->firewall || h.net->masquerade))
+		if (created && (h.net->firewall || h.net->masquerade || net_needs_nft(h.net)))
 			nft_apply(cfg);   /* add the new bridge/subnet to the ruleset */
 	}
 
@@ -786,6 +1184,12 @@ void handle_connection(const struct tr_config *cfg, int sock)
 		break;
 	case TR_CMD_NV_CREATE:
 		r = do_create(&h, &out);
+		break;
+	case TR_CMD_CNI_GC:
+		r = do_cni_gc(&h);
+		break;
+	case TR_CMD_CNI_STATUS:
+		r = do_cni_status(&h);
 		break;
 	default:
 		r = failf(&h, CNI_ERR_INVALID_ENV, "unsupported command");

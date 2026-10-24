@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: GPL-3.0-or-later
-.TH TRESTLED 8 "October 2026" "trestle 0.1" "System Administration"
+.TH TRESTLED 8 "October 2026" "trestle 0.2" "System Administration"
 .SH NAME
 trestled \- privileged daemon of the trestle container network plugin
 .SH SYNOPSIS
@@ -14,8 +14,9 @@ trestled \- privileged daemon of the trestle container network plugin
 runs as root and performs the network work requested by the
 .BR trestle (8)
 client on behalf of CNI runtimes and Netavark, including rootless Podman.
-It listens on a unix socket (default \fI/tmp/trestle.sock\fR; Netavark runs
-plugins with a private \fI/run\fR, so \fI/tmp\fR is used). At start-up any
+It listens on a unix socket (default \fI/var/lib/trestle/trestle.sock\fR, in
+the root-owned state directory; Netavark runs plugins with a private
+\fI/run\fR, so the socket cannot be there). At start-up any
 file already present at the socket path is removed, and the socket is
 recreated if it is later deleted or replaced. Its owner, group and mode come
 from the configuration (default root:root 0777).
@@ -77,6 +78,26 @@ Check the configuration, print the networks and the generated nftables
 ruleset, and exit.
 .TP
 .BR \-V ", " \-\-version
+.SH PORT SECURITY
+With \fBanti_spoofing\fR (default) and \fBisolation\fR, trestled maintains the
+nftables table \fBbridge\fR \fInft_table\fR next to \fBinet\fR
+\fInft_table\fR. Its sets (port \(-> MAC, port \(-> IPv4 address, isolated
+ports, permitted port pairs) are rebuilt from the attachment records and
+replaced atomically together with the inet table whenever an attachment is
+added, removed or changes its DHCP address. Drops are counted per rule:
+\fBnft list table bridge trestle\fR shows which protection fired.
+.SH STALE STATE
+At start, every \fBgc_interval\fR seconds and on \fBtrestlectl gc\fR,
+attachments whose host veth is gone are removed together with their lease,
+DNS entries and DHCP keeper, orphaned leases are released and lost DHCP
+keepers are restarted (the container network namespace is found again
+through \fI/run/netns\fR or \fI/proc/*/ns/net\fR).
+.SH DHCP KEEPERS
+For networks with \fBipam = dhcp\fR, \fBtrestled \-\-dhcp\-keeper\fR
+\fInetwork\fR \fIcontainer-id\fR runs once per container (in a systemd scope
+\fBtrestle-dhcp-\fIveth\fB.scope\fR when systemd is available, so it is not
+stopped with the service). It is started by trestled itself and not meant
+to be run by hand.
 .SH SIGNALS
 .TP
 .B SIGHUP
@@ -94,12 +115,14 @@ exit. Containers stay connected.
 .I /etc/trestle/conf.d/*.conf
 .TP
 .I /var/lib/trestle/
-leases (\fIipam/\fR), attachments, bridge ownership markers.
+leases (\fIipam/\fR), attachments, bridge ownership markers, DHCP keeper
+pid files (\fIdhcp/\fR).
 .TP
 .I /run/trestle/aardvark-dns/
 aardvark-dns configuration for networks with \fBaardvark_dns = yes\fR.
 .SH SEE ALSO
 .BR trestle (8),
+.BR trestlectl (8),
 .BR trestle.conf (5),
 .BR nft (8),
 .BR systemctl (1)

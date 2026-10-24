@@ -44,6 +44,7 @@ void config_defaults(struct tr_config *c)
 	c->log_level = LOG_INFO;
 	c->request_timeout = 10;
 	c->max_requests_per_user = 8;
+	c->gc_interval = 300;
 	c->ip_forward = false;
 	tr_strlcpy(c->nft_binary, TRESTLE_NFT_BINARY, sizeof(c->nft_binary));
 	tr_strlcpy(c->nft_table, "trestle", sizeof(c->nft_table));
@@ -122,6 +123,19 @@ int config_max_script_time(const struct tr_config *c)
 	return max;
 }
 
+int config_max_dhcp_time(const struct tr_config *c)
+{
+	int max = 0;
+	for (size_t i = 0; i <= c->nnets; i++) {
+		const struct tr_network *n = i < c->nnets ? &c->nets[i] : (c->has_wildcard ? &c->wildcard : NULL);
+		if (!n)
+			break;
+		if (n->dhcp && n->dhcp_timeout > max)
+			max = n->dhcp_timeout;
+	}
+	return max;
+}
+
 const struct tr_network *config_find_network(const struct tr_config *c, const char *name)
 {
 	for (size_t i = 0; i < c->nnets; i++)
@@ -139,6 +153,10 @@ static void network_defaults(struct tr_network *n, const char *name)
 	n->podman_ipam = TR_PODMAN_IPAM_NONE;
 	n->script_timeout = 30;
 	n->subnet_prefix = 24;
+	n->anti_spoofing = true;
+	n->isolation = TR_ISO_NONE;
+	n->dhcp_timeout = 10;
+	n->dhcp_hostname = true;
 }
 
 static struct tr_network *get_or_add_network(struct tr_config *c, const char *name)
@@ -222,6 +240,10 @@ static int set_global(struct tr_config *c, const char *key, const char *val,
 		if (!tr_parse_int(val, 1, 600, &v))
 			return seterr(errbuf, errlen, "%s:%d: request_timeout must be 1-600", fname, line);
 		c->request_timeout = (int)v;
+	} else if (!strcmp(key, "gc_interval")) {
+		if (!tr_parse_int(val, 0, 86400, &v) || (v > 0 && v < 10))
+			return seterr(errbuf, errlen, "%s:%d: gc_interval must be 0 (off) or 10-86400 seconds", fname, line);
+		c->gc_interval = (int)v;
 	} else if (!strcmp(key, "max_requests_per_user")) {
 		if (!tr_parse_int(val, 1, 64, &v))
 			return seterr(errbuf, errlen, "%s:%d: max_requests_per_user must be 1-64", fname, line);
@@ -400,6 +422,32 @@ static int set_network(struct tr_network *n, const char *key, const char *val,
 		if (*val && !tr_valid_hostname_label(val))
 			return seterr(errbuf, errlen, "%s:%d: invalid firewalld zone name '%s'", fname, line, val);
 		CPY(n->firewalld_zone);
+	} else if (!strcmp(key, "anti_spoofing")) {
+		BOOL(n->anti_spoofing);
+	} else if (!strcmp(key, "allow_ipv6")) {
+		BOOL(n->allow_ipv6);
+	} else if (!strcmp(key, "isolation")) {
+		if (!strcasecmp(val, "none"))
+			n->isolation = TR_ISO_NONE;
+		else if (!strcasecmp(val, "user"))
+			n->isolation = TR_ISO_USER;
+		else if (!strcasecmp(val, "container"))
+			n->isolation = TR_ISO_CONTAINER;
+		else
+			return seterr(errbuf, errlen, "%s:%d: isolation must be none, user or container", fname, line);
+	} else if (!strcmp(key, "ipam")) {
+		if (!strcasecmp(val, "dhcp"))
+			n->dhcp = true;
+		else if (!strcasecmp(val, "static") || !strcasecmp(val, "none") || !*val)
+			n->dhcp = false;
+		else
+			return seterr(errbuf, errlen, "%s:%d: ipam must be static or dhcp", fname, line);
+	} else if (!strcmp(key, "dhcp_timeout")) {
+		if (!tr_parse_int(val, 1, 120, &v))
+			return seterr(errbuf, errlen, "%s:%d: dhcp_timeout must be 1-120 seconds", fname, line);
+		n->dhcp_timeout = (int)v;
+	} else if (!strcmp(key, "dhcp_hostname")) {
+		BOOL(n->dhcp_hostname);
 	} else if (!strcmp(key, "nft_rule")) {
 		/* repeatable, accumulates across files */
 		if (strchr(val, '\n') || strchr(val, ';') || strchr(val, '{') || strchr(val, '}'))
@@ -515,6 +563,7 @@ static int cmpstr(const void *a, const void *b)
 int config_load(struct tr_config *c, const char *path, char *errbuf, size_t errlen)
 {
 	char dir[PATH_MAX];
+	tr_strlcpy(c->config_path, path, sizeof(c->config_path));
 	if (load_file(c, path, true, errbuf, errlen) < 0)
 		return -1;
 
@@ -594,6 +643,18 @@ static int validate_network(struct tr_network *n, char *errbuf, size_t errlen)
 			if (!*t)
 				return seterr(errbuf, errlen, "network '%s': empty user/group entry", n->name);
 		}
+		if (n->dhcp && addressed)
+			return seterr(errbuf, errlen,
+				      "network '%s': ipam = dhcp cannot be combined with subnet / subnet_pool", n->name);
+		if (n->dhcp && n->masquerade)
+			return seterr(errbuf, errlen, "network '%s': masquerade is not supported with ipam = dhcp", n->name);
+		if (n->dhcp && n->aardvark_dns)
+			return seterr(errbuf, errlen,
+				      "network '%s': aardvark_dns needs a bridge address (subnet), not ipam = dhcp", n->name);
+		/* DHCP leases give the container an address, which is enough for
+		 * hosts / dnsmasq names */
+		if (n->dhcp)
+			addressed = true;
 		if (n->aardvark_dns && !addressed)
 			return seterr(errbuf, errlen, "network '%s': aardvark_dns requires subnet", n->name);
 		if (n->masquerade && !addressed)

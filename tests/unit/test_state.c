@@ -156,9 +156,20 @@ static void test_nft(void)
 	char err[256];
 	struct buf b = { 0 };
 	config_defaults(&c);
-	CHECK(config_parse_text(&c, "[network:a]\nusers=*\nsubnet=10.0.0.1/24\n", "t", err, sizeof(err)) == 0);
+	CHECK(config_parse_text(&c, "[network:a]\nusers=*\nsubnet=10.0.0.1/24\nanti_spoofing=no\n", "t", err, sizeof(err)) == 0);
 	CHECK(config_finalize(&c, err, sizeof(err)) == 0);
 	CHECK(!nft_build_ruleset(&c, &b));       /* nothing requested */
+	config_free(&c);
+
+	/* anti_spoofing is on by default: the bridge table is always there */
+	config_defaults(&c);
+	CHECK(config_parse_text(&c, "[network:a]\nusers=*\nsubnet=10.0.0.1/24\n", "t", err, sizeof(err)) == 0);
+	CHECK(config_finalize(&c, err, sizeof(err)) == 0);
+	CHECK(nft_build_ruleset(&c, &b));
+	CHECK_CONTAINS(b.p, "table bridge trestle {");
+	CHECK_CONTAINS(b.p, "iifname \"trv*\" counter drop");
+	CHECK(strstr(b.p, "table inet trestle {") == NULL);   /* no firewall/masquerade/isolation */
+	buf_free(&b);
 	config_free(&c);
 
 	config_defaults(&c);
@@ -181,6 +192,69 @@ static void test_nft(void)
 	CHECK_CONTAINS(b.p, "ip saddr 10.5.0.0/16 oifname != \"br-lab\" masquerade");
 	buf_free(&b);
 	config_free(&c);
+}
+
+static void writefile(const char *path, const char *text);
+
+static void put_record(const char *state, const char *net, const char *cid, const char *uid, const char *veth,
+		       const char *mac, const char *ip, bool dhcp)
+{
+	char p[512], body[512];
+	snprintf(p, sizeof(p), "%s/attachments/%s/%s", state, net, cid);
+	snprintf(body, sizeof(body),
+		 "network=%s\ncontainer_id=%s\ncontainer_name=n%s\nuser=u%s\nuid=%s\nmode=netavark\nifname=eth0\n"
+		 "veth=%s\nmac=%s\n%s%s%s%saliases=\n",
+		 net, cid, cid, uid, uid, veth, mac, ip ? "ip=" : "", ip ? ip : "", ip ? "\n" : "", dhcp ? "dhcp=1\n" : "");
+	writefile(p, body);
+}
+
+static void test_port_security(void)
+{
+	struct tr_config c;
+	char err[256], cfgtext[1024];
+	struct buf b = { 0 };
+	char *state = t_tmpdir();
+	snprintf(cfgtext, sizeof(cfgtext),
+		 "[global]\nstate_dir=%s\n"
+		 "[network:lab]\nusers=*\nbridge=br-lab\nsubnet=10.9.0.1/24\nisolation=user\n"
+		 "[network:lan]\nusers=*\nbridge=br0\nipam=dhcp\nallow_ipv6=yes\n"
+		 "[network:raw]\nusers=*\nbridge=br-raw\n"
+		 "[network:open]\nusers=*\nbridge=br-open\nsubnet=10.8.0.1/24\nanti_spoofing=no\nisolation=container\n",
+		 state);
+	put_record(state, "lab", "c1", "1000", "trv000000000001", "02:00:00:00:00:01", "10.9.0.2/24", false);
+	put_record(state, "lab", "c2", "1000", "trv000000000002", "02:00:00:00:00:02", "10.9.0.3/24", false);
+	put_record(state, "lab", "c3", "1001", "trv000000000003", "02:00:00:00:00:03", "10.9.0.4/24", false);
+	put_record(state, "lan", "c4", "1001", "trv000000000004", "02:00:00:00:00:04", NULL, true);
+	put_record(state, "raw", "c5", "1001", "trv000000000005", "02:00:00:00:00:05", NULL, false);
+	put_record(state, "open", "c6", "1001", "trv000000000006", "02:00:00:00:00:06", "10.8.0.2/24", false);
+
+	config_defaults(&c);
+	CHECK(config_parse_text(&c, cfgtext, "t", err, sizeof(err)) == 0);
+	CHECK(config_finalize(&c, err, sizeof(err)) == 0);
+	CHECK(nft_build_ruleset(&c, &b));
+	/* MAC and IP bindings of protected ports */
+	CHECK_CONTAINS(b.p, "\"trv000000000001\" . 02:00:00:00:00:01");
+	CHECK_CONTAINS(b.p, "\"trv000000000003\" . 10.9.0.4");
+	CHECK(strstr(b.p, "\"trv000000000006\" . 02:00:00:00:00:06") == NULL);   /* anti_spoofing = no */
+	CHECK_CONTAINS(b.p, "set open_ports {\n\t\ttype ifname;\n\t\telements = { \"trv000000000006\" }");
+	CHECK_CONTAINS(b.p, "set dhcp_ports {\n\t\ttype ifname;\n\t\telements = { \"trv000000000004\" }");
+	CHECK_CONTAINS(b.p, "set mac_only_ports {\n\t\ttype ifname;\n\t\telements = { \"trv000000000005\" }");
+	CHECK_CONTAINS(b.p, "set v6_ports {\n\t\ttype ifname;\n\t\telements = { \"trv000000000004\" }");
+	/* isolation = user: only the two ports of uid 1000 are peers */
+	CHECK_CONTAINS(b.p, "\"trv000000000001\" . \"trv000000000002\"");
+	CHECK_CONTAINS(b.p, "\"trv000000000002\" . \"trv000000000001\"");
+	CHECK(strstr(b.p, "\"trv000000000003\" . \"trv") == NULL);
+	CHECK(strstr(b.p, "\"trv000000000006\" . \"trv") == NULL);   /* container isolation: no peers */
+	/* L3 hairpin through the host for isolated networks */
+	CHECK_CONTAINS(b.p, "iifname \"br-lab\" oifname \"br-lab\" ip saddr . ip daddr != @iso_br_lab");
+	CHECK_CONTAINS(b.p, "10.9.0.2 . 10.9.0.3");
+	CHECK(strstr(b.p, "10.9.0.2 . 10.9.0.4") == NULL);
+	CHECK_CONTAINS(b.p, "iifname \"br-open\" oifname \"br-open\" ip saddr . ip daddr != @iso_br_open");
+	CHECK_CONTAINS(b.p, "udp sport 67 counter drop");
+	CHECK_CONTAINS(b.p, "nd-router-advert");
+	buf_free(&b);
+	config_free(&c);
+	t_rmrf(state);
 }
 
 static void writefile(const char *path, const char *text)
@@ -362,6 +436,7 @@ int main(void)
 	RUN(test_records);
 	RUN(test_hosts_block);
 	RUN(test_nft);
+	RUN(test_port_security);
 	RUN(test_foreign_manager);
 	RUN(test_proto);
 	RUN(test_acl);

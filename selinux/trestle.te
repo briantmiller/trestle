@@ -1,4 +1,4 @@
-policy_module(trestle, 0.1.0)
+policy_module(trestle, 0.2.0)
 
 ########################################
 #
@@ -31,9 +31,11 @@ files_type(trestle_var_lib_t)
 type trestle_var_run_t;
 files_type(trestle_var_run_t)
 
-# /tmp/trestle.sock
-type trestle_tmp_t;
-files_tmp_file(trestle_tmp_t)
+# the socket: /var/lib/trestle/trestle.sock (default), or /tmp/trestle.sock
+# (0.1 default, still possible)
+type trestle_sock_t;
+files_type(trestle_sock_t)
+files_tmp_file(trestle_sock_t)
 
 # hook scripts (/etc/trestle/hooks); they run in trestled_t
 type trestle_script_exec_t;
@@ -45,7 +47,7 @@ files_type(trestle_script_exec_t)
 #
 
 allow trestled_t self:capability { net_admin sys_admin sys_ptrace dac_override dac_read_search chown fowner kill net_bind_service };
-allow trestled_t self:process { signal signull getsched setfscreate };
+allow trestled_t self:process { signal signull sigkill getsched setfscreate };
 allow trestled_t self:fifo_file rw_fifo_file_perms;
 allow trestled_t self:unix_stream_socket { create_stream_socket_perms listen accept connectto };
 allow trestled_t self:unix_dgram_socket create_socket_perms;
@@ -68,9 +70,11 @@ manage_files_pattern(trestled_t, trestle_var_run_t, trestle_var_run_t)
 filetrans_pattern(trestled_t, var_run_t, trestle_var_run_t, dir, "trestle")
 allow trestled_t var_run_t:dir rw_dir_perms;
 
-# the socket in /tmp; trestled removes whatever else sits at that path
-manage_sock_files_pattern(trestled_t, trestle_tmp_t, trestle_tmp_t)
-files_tmp_filetrans(trestled_t, trestle_tmp_t, sock_file)
+# the socket; trestled removes whatever else sits at that path
+manage_sock_files_pattern(trestled_t, trestle_var_lib_t, trestle_sock_t)
+filetrans_pattern(trestled_t, trestle_var_lib_t, trestle_sock_t, sock_file)
+manage_sock_files_pattern(trestled_t, tmp_t, trestle_sock_t)
+files_tmp_filetrans(trestled_t, trestle_sock_t, sock_file)
 allow trestled_t tmp_t:dir rw_dir_perms;
 allow trestled_t tmp_t:{ file sock_file lnk_file } { getattr unlink };
 
@@ -110,6 +114,12 @@ corenet_tcp_bind_generic_node(trestled_t)
 corenet_udp_bind_generic_node(trestled_t)
 corenet_tcp_bind_dns_port(trestled_t)
 corenet_udp_bind_dns_port(trestled_t)
+
+# ipam = dhcp: trestled runs itself as the per-container DHCP lease keeper
+# (through systemd-run --scope, staying in trestled_t) and talks DHCP from
+# UDP port 68 inside container network namespaces
+can_exec(trestled_t, trestled_exec_t)
+corenet_udp_bind_dhcpc_port(trestled_t)
 
 logging_send_syslog_msg(trestled_t)
 miscfiles_read_localization(trestled_t)
@@ -172,7 +182,9 @@ optional_policy(`
 	allow container_runtime_t trestle_var_run_t:file manage_file_perms;
 
 	# netavark / podman run the trestle client
-	allow container_runtime_t trestle_tmp_t:sock_file rw_sock_file_perms;
+	files_search_var_lib(container_runtime_t)
+	allow container_runtime_t trestle_var_lib_t:dir search_dir_perms;
+	allow container_runtime_t trestle_sock_t:sock_file rw_sock_file_perms;
 	allow container_runtime_t trestled_t:unix_stream_socket connectto;
 	allow container_runtime_t trestled_t:dir search;
 	allow container_runtime_t trestled_t:file read_file_perms;
@@ -198,7 +210,8 @@ optional_policy(`
 	gen_require(`
 		type unconfined_t, unconfined_service_t;
 	')
-	allow { unconfined_t unconfined_service_t } trestle_tmp_t:sock_file rw_sock_file_perms;
+	allow { unconfined_t unconfined_service_t } trestle_var_lib_t:dir search_dir_perms;
+	allow { unconfined_t unconfined_service_t } trestle_sock_t:sock_file rw_sock_file_perms;
 	allow { unconfined_t unconfined_service_t } trestled_t:unix_stream_socket connectto;
 	allow { unconfined_t unconfined_service_t } trestled_t:dir search;
 	allow { unconfined_t unconfined_service_t } trestled_t:file read_file_perms;

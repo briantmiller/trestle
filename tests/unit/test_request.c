@@ -219,6 +219,72 @@ static void test_hostile(void)
 	expect_cni_fail(&e3, CONF, CNI_ERR_INVALID_ENV, "CNI_CONTAINERID");
 }
 
+static void test_cni_gc_status(void)
+{
+	struct env e = { .k = { "CNI_COMMAND", "CNI_PATH" }, .v = { "GC", "/opt/cni/bin" } };
+	struct tr_request r;
+	char err[256];
+	int code;
+	const char *gc = "{\"cniVersion\":\"1.1.0\",\"name\":\"lab\",\"type\":\"trestle\","
+			 "\"cni.dev/valid-attachments\":[{\"containerID\":\"abc\",\"ifname\":\"eth0\"},"
+			 "{\"containerID\":\"def\",\"ifname\":\"net1\"}]}";
+	CHECK(tr_parse_cni(lookup, &e, gc, &r, err, sizeof(err), &code) == 0);
+	CHECK(r.cmd == TR_CMD_CNI_GC);
+	CHECK_STR(r.network, "lab");
+	CHECK(r.valid_attachments.n == 2 && !strcmp(r.valid_attachments.v[1], "def/net1"));
+	tr_request_free(&r);
+
+	/* GC without the list: everything of the caller is stale */
+	CHECK(tr_parse_cni(lookup, &e, "{\"cniVersion\":\"1.1.0\",\"name\":\"lab\",\"type\":\"t\"}", &r, err,
+			   sizeof(err), &code) == 0 && r.valid_attachments.n == 0);
+	tr_request_free(&r);
+
+	expect_cni_fail(&e, "{\"cniVersion\":\"1.0.0\",\"name\":\"lab\",\"type\":\"t\"}", CNI_ERR_INCOMPATIBLE_VERSION, "1.1.0");
+	expect_cni_fail(&e, "{\"cniVersion\":\"1.1.0\",\"name\":\"lab\",\"type\":\"t\",\"cni.dev/valid-attachments\":{}}",
+			CNI_ERR_INVALID_CONFIG, "must be an array");
+	expect_cni_fail(&e, "{\"cniVersion\":\"1.1.0\",\"name\":\"lab\",\"type\":\"t\",\"cni.dev/valid-attachments\":[{\"containerID\":\"..\",\"ifname\":\"eth0\"}]}",
+			CNI_ERR_INVALID_CONFIG, "invalid entry");
+	expect_cni_fail(&e, "{\"cniVersion\":\"1.1.0\",\"name\":\"lab\",\"type\":\"t\",\"cni.dev/valid-attachments\":[{\"containerID\":\"a\"}]}",
+			CNI_ERR_INVALID_CONFIG, "containerID and ifname");
+	struct env nop = { .k = { "CNI_COMMAND" }, .v = { "GC" } };
+	expect_cni_fail(&nop, "{}", CNI_ERR_INVALID_ENV, "CNI_PATH");
+
+	struct env st = { .k = { "CNI_COMMAND" }, .v = { "STATUS" } };
+	CHECK(tr_parse_cni(lookup, &st, "{\"cniVersion\":\"1.1.0\",\"name\":\"lab\",\"type\":\"t\"}", &r, err,
+			   sizeof(err), &code) == 0 && r.cmd == TR_CMD_CNI_STATUS);
+	tr_request_free(&r);
+	CHECK(tr_cni_version_supported("1.1.0"));
+}
+
+static void test_admin(void)
+{
+	struct tr_request r;
+	char err[256];
+	char *a1[] = { "list", "-n", "lab", "--json" };
+	CHECK(tr_parse_admin(4, a1, &r, err, sizeof(err)) == 0);
+	CHECK(r.cmd == TR_CMD_ADM_LIST && r.adm_json && !strcmp(r.network, "lab"));
+	char *a2[] = { "gc", "--dry-run" };
+	CHECK(tr_parse_admin(2, a2, &r, err, sizeof(err)) == 0 && r.adm_dry_run);
+	char *a3[] = { "detach", "lab", "abc123" };
+	CHECK(tr_parse_admin(3, a3, &r, err, sizeof(err)) == 0);
+	CHECK(r.cmd == TR_CMD_ADM_DETACH && !strcmp(r.container_id, "abc123"));
+	char *b1[] = { "detach", "lab" };
+	CHECK(tr_parse_admin(2, b1, &r, err, sizeof(err)) < 0);
+	char *b2[] = { "detach", "../x", "abc" };
+	CHECK(tr_parse_admin(3, b2, &r, err, sizeof(err)) < 0);
+	char *b3[] = { "detach", "lab", ".." };
+	CHECK(tr_parse_admin(3, b3, &r, err, sizeof(err)) < 0);
+	char *b4[] = { "list", "--dry-run" };
+	CHECK(tr_parse_admin(2, b4, &r, err, sizeof(err)) < 0);
+	char *b5[] = { "rm" };
+	CHECK(tr_parse_admin(1, b5, &r, err, sizeof(err)) < 0);
+	char *b6[] = { "list", "-n" };
+	CHECK(tr_parse_admin(2, b6, &r, err, sizeof(err)) < 0);
+	char *b7[] = { "status", "x\ny" };
+	CHECK(tr_parse_admin(2, b7, &r, err, sizeof(err)) < 0);
+	CHECK(tr_parse_admin(0, NULL, &r, err, sizeof(err)) < 0);
+}
+
 static void test_error_format(void)
 {
 	char *s = tr_format_cni_error("0.4.0", 7, "bad \"thing\"", NULL);
@@ -237,6 +303,8 @@ int main(void)
 	RUN(test_cni_del_without_netns);
 	RUN(test_netavark);
 	RUN(test_hostile);
+	RUN(test_cni_gc_status);
+	RUN(test_admin);
 	RUN(test_error_format);
 	TEST_MAIN_END();
 }

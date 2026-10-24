@@ -396,6 +396,57 @@ else:
     case("CNI root: path traversal to /proc/self/ns/net", R,
          frame(cni_wire(cni_env(netns="/run/netns/../../proc/self/ns/net"))))
 
+print("### trestlectl (admin) requests")
+def adm(argv, stdin="", fd=False, version=1, mode="admin"):
+    return json.dumps({"version": version, "mode": mode, "command": argv[0] if argv else "", "argv": ["trestlectl"] + argv,
+                       "env": {}, "netns_path": "", "netns_fd": fd, "rootless": False, "stdin": stdin})
+for name, body, fds, exp in [
+    ("admin with stdin", adm(["list"], stdin="{}"), [], R),
+    ("admin with a netns fd", adm(["list"], fd=True), [my_ns], R),
+    ("admin unknown command", adm(["rm", "-rf"]), [], R),
+    ("admin detach traversal network", adm(["detach", "../../etc", "x"]), [], R),
+    ("admin detach traversal id", adm(["detach", "sec", "../../../etc/passwd"]), [], R),
+    ("admin detach dot id", adm(["detach", "sec", ".."]), [], R),
+    ("admin detach of a container never attached", adm(["detach", "sec", "nothere"]), [], R),
+    ("admin -n traversal", adm(["list", "-n", "../x"]), [], R),
+    ("admin newline in argument", adm(["list", "-n", "sec\n"]), [], R),
+    ("admin NUL in argument", adm(["list", "-n", "sec\u0000x"]), [], R),
+    ("admin 300 char argument", adm(["list", "-n", "s" * 300]), [], R),
+    ("admin too many args", adm(["list"] * 8), [], R),
+    ("admin leases as a user", adm(["leases"]), [], R if MODE == "user" else A),
+    ("admin gc as a user", adm(["gc", "--dry-run"]), [], R if MODE == "user" else A),
+    ("admin list (own entries only)", adm(["list"]), [], A),
+    ("admin status", adm(["status"]), [], A),
+]:
+    if fds:
+        case(name, exp, frame(body, flags=1), fds)
+    else:
+        case(name, exp, frame(body))
+
+print("### CNI GC / STATUS")
+def gcconf(extra):
+    c = {"cniVersion": "1.1.0", "name": "sec", "type": "trestle"}
+    c.update(extra)
+    return json.dumps(c)
+gcenv = {"CNI_COMMAND": "GC", "CNI_PATH": "/opt/cni/bin"}
+for name, env, conf in [
+    ("GC valid-attachments not an array", gcenv, gcconf({"cni.dev/valid-attachments": "x"})),
+    ("GC entry with traversal id", gcenv, gcconf({"cni.dev/valid-attachments": [{"containerID": "../x", "ifname": "eth0"}]})),
+    ("GC entry with bad ifname", gcenv, gcconf({"cni.dev/valid-attachments": [{"containerID": "a", "ifname": "../x"}]})),
+    ("GC entry not an object", gcenv, gcconf({"cni.dev/valid-attachments": ["a/eth0"]})),
+    ("GC entry with NUL", gcenv, gcconf({"cni.dev/valid-attachments": [{"containerID": "a\u0000b", "ifname": "eth0"}]})),
+    ("GC old cniVersion", gcenv, json.dumps({"cniVersion": "1.0.0", "name": "sec", "type": "t"})),
+    ("GC without CNI_PATH", {"CNI_COMMAND": "GC"}, gcconf({})),
+    ("GC network traversal", gcenv, json.dumps({"cniVersion": "1.1.0", "name": "../x", "type": "t"})),
+    ("STATUS network not permitted", {"CNI_COMMAND": "STATUS"}, json.dumps({"cniVersion": "1.1.0", "name": "nosuch", "type": "t"})),
+]:
+    case(name, R, frame(json.dumps({"version": 1, "mode": "cni", "command": env["CNI_COMMAND"], "argv": ["trestle"],
+                                    "env": env, "netns_path": "", "netns_fd": False, "rootless": False, "stdin": conf})))
+# a GC with an empty list only touches the caller's own CNI attachments
+case("GC with an empty list (own CNI attachments only)", A,
+     frame(json.dumps({"version": 1, "mode": "cni", "command": "GC", "argv": ["trestle"], "env": gcenv,
+                       "netns_path": "", "netns_fd": False, "rootless": False, "stdin": gcconf({"cni.dev/valid-attachments": []})})))
+
 print("### baseline (valid requests still work)")
 case("valid setup", A, frame(wire(stdin=nv_exec(cid="b" * 64, cname="base", ifname="base0")), flags=1), [my_ns])
 case("valid teardown", A, frame(wire("teardown", stdin=nv_exec(cid="b" * 64, cname="base")), flags=1), [my_ns])

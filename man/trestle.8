@@ -1,5 +1,5 @@
 .\" SPDX-License-Identifier: GPL-3.0-or-later
-.TH TRESTLE 8 "October 2026" "trestle 0.1" "System Administration"
+.TH TRESTLE 8 "October 2026" "trestle 0.2" "System Administration"
 .SH NAME
 trestle \- CNI and Netavark plugin that attaches (rootless) containers to host bridges
 .SH SYNOPSIS
@@ -14,7 +14,7 @@ trestle \- CNI and Netavark plugin that attaches (rootless) containers to host b
 .B trestle teardown
 \fInetns-path\fR < \fIplugin-exec.json\fR
 .br
-.BR CNI_COMMAND = ADD | DEL | CHECK | VERSION
+.BR CNI_COMMAND = ADD | DEL | CHECK | GC | STATUS | VERSION
 .B trestle
 < \fInetwork-config.json\fR
 .SH DESCRIPTION
@@ -27,7 +27,7 @@ reads the JSON document from standard input and forwards everything to
 .BR trestled (8)
 over the unix socket configured in
 .BR trestle.conf (5)
-(default \fI/tmp/trestle.sock\fR). The exact output of the daemon \- a CNI
+(default \fI/var/lib/trestle/trestle.sock\fR). The exact output of the daemon \- a CNI
 result or a Netavark status block \- is printed on standard output and its
 exit status is returned.
 .PP
@@ -68,8 +68,12 @@ status block.
 Removes the host side of the veth (which also removes the peer), releases the
 address and removes DNS / hosts entries.
 .SH CNI
-Supported versions: 0.3.0, 0.3.1, 0.4.0 and 1.0.0. Commands: ADD, DEL, CHECK
-and VERSION. The container name used for naming is
+Supported versions: 0.3.0, 0.3.1, 0.4.0, 1.0.0 and 1.1.0. Commands: ADD,
+DEL, CHECK, VERSION and (cniVersion 1.1.0) GC and STATUS. \fBGC\fR removes
+the caller's CNI attachments on the network that are not listed in
+\fBcni.dev/valid-attachments\fR (other users' and Netavark attachments are
+never touched). \fBSTATUS\fR fails with code 50 when trestled is not
+reachable or the network has no free addresses. The container name used for naming is
 \fIK8S_POD_NAMESPACE\fR\-\fIK8S_POD_NAME\fR from \fBCNI_ARGS\fR, or the
 first 12 characters of \fBCNI_CONTAINERID\fR. Static addresses can be
 requested with \fBIP=\fR in \fBCNI_ARGS\fR or the \fBips\fR capability
@@ -99,9 +103,10 @@ Print debug messages on standard error.
 .TP
 .I /etc/trestle/trestle.conf
 .TP
-.I /tmp/trestle.sock
+.I /var/lib/trestle/trestle.sock
 .SH SEE ALSO
 .BR trestled (8),
+.BR trestlectl (8),
 .BR trestle.conf (5),
 .BR podman-network-create (1),
 .BR netavark (1)

@@ -13,10 +13,12 @@
 #
 interface(`trestle_client',`
 	gen_require(`
-		type trestled_t, trestle_tmp_t;
+		type trestled_t, trestle_sock_t, trestle_var_lib_t;
 	')
 
-	allow $1 trestle_tmp_t:sock_file rw_sock_file_perms;
+	files_search_var_lib($1)
+	allow $1 trestle_var_lib_t:dir search_dir_perms;
+	allow $1 trestle_sock_t:sock_file rw_sock_file_perms;
 	allow $1 trestled_t:unix_stream_socket connectto;
 	allow $1 trestled_t:dir search;
 	allow $1 trestled_t:file read_file_perms;

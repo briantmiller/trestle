@@ -19,7 +19,10 @@ src/server/   trestled
   bridge.c      bridge creation/removal, NetworkManager/networkd/libvirt detection
   state.c       IPAM leases, attachment records, bridge ownership markers
   dnsout.c      /etc/hosts block, dnsmasq hosts file, aardvark-dns
-  nft.c         nftables ruleset generation and atomic application
+  nft.c         nftables ruleset generation and atomic application (inet + bridge tables)
+  gc.c          stale state sweep, CNI GC
+  dhcp.c        DHCPv4 client (ipam = dhcp)
+  keeper.c      per-container DHCP lease keeper process
 ```
 
 ## Invocation modes
@@ -31,6 +34,7 @@ The client decides the mode from its environment:
 | `CNI_COMMAND` set | CNI | ADD, DEL, CHECK → daemon; VERSION → locally |
 | first argument `create`, `setup`, `teardown` | Netavark plugin API 1.0.0 | daemon |
 | `info` or no argument | Netavark | locally |
+| program name `trestlectl` | admin | daemon (`status`, `list`, `leases`, `gc`, `detach`) |
 
 Before contacting the daemon the client validates everything it can (command,
 `CNI_CONTAINERID`, `CNI_IFNAME`, `CNI_NETNS`, `CNI_PATH`, `cniVersion`,
@@ -83,6 +87,68 @@ plus once for all existing bridges at daemon start and on SIGHUP, restores
 it. Before a bridge is deleted it is removed from the zone if it is still
 in ours. Exit status 252 (firewalld not running) is silently ignored.
 
+## Port security
+
+`nft.c` builds two tables in one atomic `nft -f` transaction: `inet
+<nft_table>` (firewall, masquerade, layer-3 isolation) and `bridge
+<nft_table>` (anti-spoofing, layer-2 isolation). The bridge table's sets
+are generated from the attachment records, so they are always exactly the
+current attachments; the ruleset is re-applied after every attach, detach,
+GC removal and DHCP address change, under the state lock (the daemon's own
+re-applications at start and reload take the lock too).
+
+```
+prerouting (bridge, prio -200)   frames entering the bridge from a port
+  iifname @open_ports  accept         networks with anti_spoofing = no
+  iifname @ports       jump port_in   known trestle ports
+  iifname "trv*"       drop           unknown trestle-named ports (fail closed)
+port_in
+  iifname . ether saddr != @port_mac drop      MAC spoofing
+  VLAN tags, DHCP server (udp sport 67), IPv6 RA/redirect, DHCPv6 server: drop
+  iifname @mac_only_ports accept      no IPAM by trestle: only MAC checked
+  ARP:  sender MAC must match; sender IP in @port_ip (DHCP ports: 0.0.0.0 probes)
+  IPv4: iifname . ip saddr @port_ip; DHCP ports: 0.0.0.0:68 -> :67
+  IPv6: only @v6_ports (allow_ipv6); everything else dropped
+forward (bridge)
+  iifname @iso_ports oifname @iso_ports iifname . oifname != @iso_peers drop
+inet forward
+  iifname BR oifname BR ip saddr . ip daddr != @iso_<BR> drop   (routed hairpin)
+```
+
+`iso_peers` holds the ordered pairs of ports of the same user
+(`isolation = user`; empty for `container`). A new port is entered into the
+sets before it is enslaved and brought up, so there is no unprotected
+window. Bridges trestle creates get a fixed MAC (from md5 of the bridge name)
+so the gateway MAC does not change as ports come and go.
+
+## Stale state
+
+`gc.c`. A *sweep* (daemon start under the state lock, a forked child every
+`gc_interval`, `trestlectl gc`) removes attachments whose host veth no
+longer exists, releases leases no attachment owns, and restarts DHCP
+keepers that are gone, finding the container netns again by the
+`st_dev`/`st_ino` stored in the record (`/run/netns`, then
+`/proc/*/ns/net`). *CNI GC* (cniVersion 1.1.0) removes the calling uid's
+`cni` attachments on the network that are not in `cni.dev/valid-attachments`,
+including their veth. *STATUS* reports code 50 when the network's pool is
+exhausted (the client reports 50 when trestled is unreachable).
+
+## DHCP (ipam = dhcp)
+
+`dhcp.c` is a small RFC 2131 client. Packets go through a UDP socket created
+inside the container netns (`setns` round trip), bound to the container
+interface and port 68, with the container's MAC as `chaddr` and client
+identifier, so the LAN server sees a normal client. On attach the request
+handler runs DISCOVER/OFFER/REQUEST/ACK (`dhcp_timeout`), configures address,
+default route and DNS servers, records the lease and starts the keeper:
+`trestled --dhcp-keeper NET CID` with the netns on fd 3, through
+`systemd-run --scope --unit=trestle-dhcp-<veth>` when systemd runs (so it is
+outside trestled's cgroup and survives restarts). The keeper renews at T1
+(unicast), rebinds at T2 (broadcast), re-acquires after a NAK or expiry,
+updates the container and the record (and with that the anti-spoofing sets
+and DNS outputs), exits when its veth or record disappears and sends
+DHCPRELEASE on SIGTERM (teardown).
+
 ## Concurrency
 
 The main process only accepts connections. Each connection is handled in a
@@ -125,12 +191,17 @@ exists, the request fails rather than reusing it.
 
 ## State (`/var/lib/trestle`)
 
+The directory is `0711` while it holds the socket (default), else `0700`;
+all files below it are `0600` and all subdirectories `0700`.
+
 ```
+trestle.sock                          the daemon's socket (default location)
 ipam/<network>/<a.b.c.d>              lease, contains the container id
 ipam/<network>/.last                  round-robin cursor
 attachments/<network>/<container-id>  key=value record (user, uid, veth, ip, mac, aliases, mode)
 bridges/<bridge>                      trestle created this bridge
 wildcard/<network>                    network created from [network:*]: its bridge address/prefix (or "-")
+dhcp/<veth>.pid                       DHCP lease keeper of an attachment
 trestled.lock                         single instance lock
 state.lock                            serializes state changes between request handlers
 ```

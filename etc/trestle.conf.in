@@ -9,9 +9,12 @@
 
 [global]
 # Unix socket the clients connect to. Netavark runs plugins with a private
-# /run, so the socket lives in /tmp. Any existing file at this path is
-# removed when trestled starts.
-#socket = /tmp/trestle.sock
+# /run, so it lives in the root-owned state directory (made 0711 so clients
+# can reach the socket but not list the directory). Any existing file at
+# this path is removed when trestled starts. A path in /tmp also works but
+# needs PrivateTmp=no for trestled.service and can be squatted by other
+# users while trestled is stopped.
+#socket = @LOCALSTATEDIR@/trestle/trestle.sock
 #socket_owner = root
 #socket_group = root
 #socket_mode = 0777
@@ -34,6 +37,10 @@
 # Concurrent connections one non-root user may have open (1-64); root is
 # only bound by the global limit of 64.
 #max_requests_per_user = 8
+# Seconds between sweeps for stale state (attachments whose veth is gone,
+# orphaned leases, lost DHCP keepers); 0 = off. Also at start and with
+# "trestlectl gc".
+#gc_interval = 300
 
 # Set net.ipv4.ip_forward=1 at start-up (needed for routing/masquerade).
 #ip_forward = no
@@ -112,6 +119,17 @@
 # in the default zone, which usually blocks DNS (aardvark-dns) to the bridge.
 #firewalld_zone = trusted
 #
+# Port security (nftables bridge table). Containers may only send with their
+# own MAC and IP address; DHCP servers, IPv6 router advertisements and
+# VLAN tags from containers are dropped. On by default.
+#anti_spoofing = yes
+# IPv6 from containers is dropped with anti_spoofing (trestle has no IPv6
+# addressing yet); allow it (MAC still checked):
+#allow_ipv6 = no
+# Traffic between containers: none (default), user (only between containers
+# of the same user) or container (none at all). Host and uplink stay reachable.
+#isolation = user
+#
 # Hook scripts (root-owned, not writable by group/others). They get the
 # event as $1 and TRESTLE_* environment variables: network, bridge,
 # container id/name, user, host/container interface names, IP address...
@@ -122,3 +140,15 @@
 #script_timeout = 30
 # ignore = only log failures; fail = a failing create/setup aborts the request
 #script_on_error = ignore
+
+# A LAN bridge whose DHCP server addresses the containers. trestled gets a
+# lease for each container (container MAC, container name as host name) and
+# keeps it renewed; the address is used for DNS outputs and anti-spoofing.
+#[network:office]
+#users = alice, bob
+#bridge = br0
+#uplink = eno1
+#ipam = dhcp
+#dhcp_timeout = 10
+#dhcp_hostname = yes
+#hosts_file = yes

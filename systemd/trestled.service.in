@@ -14,9 +14,10 @@ ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2s
 
-# The daemon must see the real /tmp (its socket lives there for Netavark),
-# the real network namespaces and /proc of its clients.
-PrivateTmp=no
+# The socket lives in /var/lib/trestle, so the daemon (and its hook
+# scripts) can have a private /tmp. If you set "socket" to a path in /tmp,
+# override this with PrivateTmp=no in a drop-in.
+PrivateTmp=yes
 # aardvark-dns is started through systemd-run in its own scope, so
 # restarting trestled does not interrupt DNS for running containers.
 KillMode=mixed
@@ -37,7 +38,8 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 StateDirectory=trestle
-StateDirectoryMode=0700
+# 0711: clients reach the socket by name, nobody else can list or read state
+StateDirectoryMode=0711
 RuntimeDirectory=trestle
 RuntimeDirectoryPreserve=yes
 

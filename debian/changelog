@@ -1,3 +1,15 @@
+trestle (0.2) unstable; urgency=medium
+
+  * Anti-spoofing: containers may only use their own MAC and IP.
+  * Isolation between users or containers on a bridge.
+  * Stale state cleanup (start, gc_interval, trestlectl gc); CNI 1.1.0 GC
+    and STATUS.
+  * trestlectl admin tool.
+  * ipam = dhcp: leases from the LAN DHCP server.
+  * Fixed MAC address on bridges trestle creates.
+
+ -- Brian Miller <brianthomasmiller@gmail.com>  Sat, 24 Oct 2026 01:30:00 -0400
+
 trestle (0.1) unstable; urgency=medium
 
   * Initial release.

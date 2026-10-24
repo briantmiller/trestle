@@ -23,6 +23,7 @@ void tr_request_free(struct tr_request *r)
 {
 	strv_clear(&r->static_ips);
 	strv_clear(&r->aliases);
+	strv_clear(&r->valid_attachments);
 	if (r->input)
 		json_object_put(r->input);
 	r->input = NULL;
@@ -30,7 +31,7 @@ void tr_request_free(struct tr_request *r)
 
 bool tr_cni_version_supported(const char *v)
 {
-	static const char *ok[] = { "0.3.0", "0.3.1", "0.4.0", "1.0.0" };
+	static const char *ok[] = { "0.3.0", "0.3.1", "0.4.0", "1.0.0", "1.1.0" };
 	for (size_t i = 0; i < ARRAY_SIZE(ok); i++)
 		if (tr_streq(v, ok[i]))
 			return true;
@@ -197,6 +198,60 @@ static int add_static_ip(struct tr_request *r, const char *s, char *err, size_t 
 	return 0;
 }
 
+/* GC and STATUS (CNI 1.1.0) work on a whole network: no container, no
+ * interface, no namespace. */
+static int parse_cni_gc_status(tr_env_fn getenv_fn, void *ctx, const char *stdin_text,
+			       struct tr_request *out, char *err, size_t errlen, int *cni_code)
+{
+	const char *path = getenv_fn(ctx, "CNI_PATH");
+	if (out->cmd == TR_CMD_CNI_GC && (!path || !*path))
+		return fail(err, errlen, "CNI_PATH is required for GC");
+	if (tr_has_ctrl(path))
+		return fail(err, errlen, "CNI_PATH must not contain control characters");
+
+	*cni_code = CNI_ERR_DECODE;
+	out->input = parse_json_object(stdin_text, err, errlen);
+	if (!out->input)
+		return -1;
+	*cni_code = CNI_ERR_INVALID_CONFIG;
+	const char *ver = jstr(out->input, "cniVersion");
+	if (!ver)
+		return fail(err, errlen, "network configuration has no cniVersion");
+	tr_strlcpy(out->cni_version, ver, sizeof(out->cni_version));
+	if (!tr_cni_version_supported(ver) || strcmp(ver, "1.1.0") < 0) {
+		*cni_code = CNI_ERR_INCOMPATIBLE_VERSION;
+		return fail(err, errlen, "%s requires cniVersion 1.1.0 (got '%s')", out->command, ver);
+	}
+	const char *name = jstr(out->input, "name");
+	if (!name || !tr_valid_network_name(name))
+		return fail(err, errlen, "network configuration has a missing or invalid 'name'");
+	tr_strlcpy(out->network, name, sizeof(out->network));
+	if (!jstr(out->input, "type"))
+		return fail(err, errlen, "network configuration has no 'type'");
+	if (out->cmd == TR_CMD_CNI_STATUS)
+		return 0;
+
+	json_object *va;
+	int t = jopt(out->input, "cni.dev/valid-attachments", json_type_array, &va);
+	if (t < 0)
+		return fail(err, errlen, "cni.dev/valid-attachments must be an array");
+	for (size_t i = 0; va && i < json_object_array_length(va); i++) {
+		json_object *e = json_object_array_get_idx(va, i), *cv, *iv;
+		if (!json_object_is_type(e, json_type_object) ||
+		    jopt(e, "containerID", json_type_string, &cv) != 1 || jopt(e, "ifname", json_type_string, &iv) != 1)
+			return fail(err, errlen, "cni.dev/valid-attachments entries need containerID and ifname strings");
+		const char *cid = json_object_get_string(cv), *ifn = json_object_get_string(iv);
+		if (!tr_valid_container_id(cid) || !tr_valid_ifname(ifn))
+			return fail(err, errlen, "invalid entry in cni.dev/valid-attachments");
+		char key[160];
+		snprintf(key, sizeof(key), "%s/%s", cid, ifn);
+		if (!strv_contains(&out->valid_attachments, key))
+			strv_push(&out->valid_attachments, key);
+	}
+	*cni_code = 0;
+	return 0;
+}
+
 int tr_parse_cni(tr_env_fn getenv_fn, void *ctx, const char *stdin_text,
 		 struct tr_request *out, char *err, size_t errlen, int *cni_code)
 {
@@ -215,12 +270,19 @@ int tr_parse_cni(tr_env_fn getenv_fn, void *ctx, const char *stdin_text,
 		out->cmd = TR_CMD_CNI_CHECK;
 	else if (!strcmp(cmd, "VERSION"))
 		out->cmd = TR_CMD_CNI_VERSION;
+	else if (!strcmp(cmd, "GC"))
+		out->cmd = TR_CMD_CNI_GC;
+	else if (!strcmp(cmd, "STATUS"))
+		out->cmd = TR_CMD_CNI_STATUS;
 	else
 		return fail(err, errlen, "unsupported CNI_COMMAND '%s'", cmd);
 	tr_strlcpy(out->command, cmd, sizeof(out->command));
 
+	if (out->cmd == TR_CMD_CNI_GC || out->cmd == TR_CMD_CNI_STATUS)
+		return parse_cni_gc_status(getenv_fn, ctx, stdin_text, out, err, errlen, cni_code);
+
 	if (out->cmd == TR_CMD_CNI_VERSION) {
-		tr_strlcpy(out->cni_version, "1.0.0", sizeof(out->cni_version));
+		tr_strlcpy(out->cni_version, TR_CNI_LATEST_VERSION, sizeof(out->cni_version));
 		/* stdin may carry {"cniVersion": "..."}; validate if present */
 		if (stdin_text && *stdin_text) {
 			out->input = parse_json_object(stdin_text, err, errlen);
@@ -467,4 +529,69 @@ char *tr_format_netavark_error(const char *msg)
 	char *s = strdup(json_object_to_json_string_ext(o, JSON_C_TO_STRING_PLAIN | JSON_C_TO_STRING_NOSLASHESCAPE));
 	json_object_put(o);
 	return s;
+}
+
+int tr_parse_admin(int nargs, char *const *args, struct tr_request *out, char *err, size_t errlen)
+{
+	memset(out, 0, sizeof(*out));
+	out->mode = TR_MODE_ADMIN;
+	const char *pos[3] = { 0 };
+	int npos = 0;
+	for (int i = 0; i < nargs; i++) {
+		const char *a = args[i];
+		if (!a || strlen(a) > 256 || tr_has_ctrl(a))
+			return fail(err, errlen, "invalid argument");
+		if (!strcmp(a, "--json")) {
+			out->adm_json = true;
+		} else if (!strcmp(a, "--dry-run") || !strcmp(a, "-n") || !strcmp(a, "--network")) {
+			if (a[2] == 'd') {
+				out->adm_dry_run = true;
+				continue;
+			}
+			if (i + 1 >= nargs)
+				return fail(err, errlen, "%s needs a network name", a);
+			const char *nn = args[++i];
+			if (!nn || !tr_valid_network_name(nn))
+				return fail(err, errlen, "invalid network name");
+			tr_strlcpy(out->network, nn, sizeof(out->network));
+		} else if (a[0] == '-') {
+			return fail(err, errlen, "unknown option '%s'", a);
+		} else {
+			if (npos == 3)
+				return fail(err, errlen, "too many arguments");
+			pos[npos++] = a;
+		}
+	}
+	if (npos == 0)
+		return fail(err, errlen, "no command given (status, list, leases, gc, detach)");
+	const char *c = pos[0];
+	tr_strlcpy(out->command, c, sizeof(out->command));
+	int want = 1;
+	if (!strcmp(c, "status")) {
+		out->cmd = TR_CMD_ADM_STATUS;
+	} else if (!strcmp(c, "list")) {
+		out->cmd = TR_CMD_ADM_LIST;
+	} else if (!strcmp(c, "leases")) {
+		out->cmd = TR_CMD_ADM_LEASES;
+	} else if (!strcmp(c, "gc")) {
+		out->cmd = TR_CMD_ADM_GC;
+	} else if (!strcmp(c, "detach")) {
+		out->cmd = TR_CMD_ADM_DETACH;
+		want = 3;
+		if (npos == 3) {
+			if (!tr_valid_network_name(pos[1]))
+				return fail(err, errlen, "invalid network name '%s'", pos[1]);
+			if (!tr_valid_container_id(pos[2]))
+				return fail(err, errlen, "invalid container id '%s'", pos[2]);
+			tr_strlcpy(out->network, pos[1], sizeof(out->network));
+			tr_strlcpy(out->container_id, pos[2], sizeof(out->container_id));
+		}
+	} else {
+		return fail(err, errlen, "unknown command '%s' (status, list, leases, gc, detach)", c);
+	}
+	if (npos != want)
+		return fail(err, errlen, want == 3 ? "usage: detach NETWORK CONTAINER-ID" : "%s takes no arguments", c);
+	if (out->adm_dry_run && out->cmd != TR_CMD_ADM_GC)
+		return fail(err, errlen, "--dry-run is only valid for gc");
+	return 0;
 }
