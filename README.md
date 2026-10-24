@@ -41,7 +41,10 @@ The same plugin also works as a regular CNI plugin for Kubernetes
    configured `bridge`. Created if missing; existing bridges are reused.
    Before creating it, trestle checks whether a NetworkManager profile names
    it; if none does and NetworkManager is running, the new bridge is marked
-   unmanaged (`nmcli device set <bridge> managed no`).
+   unmanaged (`nmcli device set <bridge> managed no`). With
+   `firewalld_zone = trusted` the bridge is also put into that firewalld
+   zone, so the default zone's rules don't block DNS and other traffic
+   from the containers to the host.
 5. **veth.** Host side `trv` + first 12 hex chars of
    `md5("network:user:container")`, enslaved to the bridge, with alias
    `trestle:user.container.network`. The peer is created directly inside the

@@ -113,6 +113,8 @@ optional_policy(`
 	')
 	allow iptables_t trestled_t:fifo_file rw_inherited_fifo_file_perms;
 	allow iptables_t trestled_t:fd use;
+	# the unit runs with NoNewPrivileges=yes; allow the transition anyway
+	allow trestled_t iptables_t:process2 { nnp_transition nosuid_transition };
 ')
 
 # systemd-run --scope for aardvark-dns
@@ -137,6 +139,14 @@ optional_policy(`
 	read_files_pattern(trestled_t, NetworkManager_etc_rw_t, NetworkManager_etc_rw_t)
 	list_dirs_pattern(trestled_t, NetworkManager_var_run_t, NetworkManager_var_run_t)
 	read_files_pattern(trestled_t, NetworkManager_var_run_t, NetworkManager_var_run_t)
+')
+
+# firewalld: firewall-cmd (python, runs in trestled_t) moves bridges into
+# the configured firewalld_zone over D-Bus
+files_read_usr_files(trestled_t)
+optional_policy(`
+	firewalld_dbus_chat(trestled_t)
+	dbus_system_bus_client(trestled_t)
 ')
 
 # aardvark-dns labeled as a container runtime binary (Fedora / RHEL)

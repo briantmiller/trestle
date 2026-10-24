@@ -76,6 +76,10 @@ missing or NetworkManager is not running; \fByes\fR logs a warning then;
 .B nmcli_binary
 Default \fI/usr/bin/nmcli\fR.
 .TP
+.B firewall_cmd
+firewall-cmd used for \fBfirewalld_zone\fR. Default
+\fI/usr/bin/firewall-cmd\fR.
+.TP
 .BR aardvark_binary ", " aardvark_dir ", " aardvark_port
 aardvark-dns executable, its configuration directory and port. Defaults
 \fI/usr/libexec/podman/aardvark-dns\fR, \fI/run/trestle/aardvark-dns\fR, 53.
@@ -154,6 +158,19 @@ Destinations containers may reach when \fBoutbound_policy = drop\fR.
 .B nft_rule
 A raw nftables rule placed first in the network's inbound and outbound
 chains. May be given several times.
+.TP
+.B firewalld_zone
+Put the network's bridge into this firewalld zone, the same as
+\fBfirewall-cmd \-\-zone=\fIZONE\fB \-\-change-interface=\fIbridge\fR.
+Without it a bridge lands in firewalld's default zone (usually
+\fBpublic\fR), which blocks DNS queries from the containers to the bridge
+address (aardvark-dns) and other traffic to the host. The binding is a
+runtime one: trestle checks it on every container attach and on daemon
+start and reload, so it comes back after \fBfirewall-cmd \-\-reload\fR as soon
+as a container starts (or run \fBsystemctl reload trestled\fR). Before
+trestle deletes a bridge it removes it from the zone. Nothing happens when
+firewalld is not running. Typical values: \fBtrusted\fR (all traffic from
+the containers to the host is accepted) or \fBinternal\fR.
 .TP
 .B create_script
 Script run when the network is created: on \fBpodman network create\fR

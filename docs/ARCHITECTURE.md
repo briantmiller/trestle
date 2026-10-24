@@ -72,6 +72,17 @@ asynchronously. A failure is logged and does not fail the request. A
 bridge named by a profile is left to NetworkManager and, as before, never
 deleted by trestle.
 
+## firewalld
+
+`firewalld.c`. For networks with `firewalld_zone`, `bridge_ensure()` asks
+`firewall-cmd --get-zone-of-interface=<bridge>` on every attach and runs
+`--zone=<zone> --change-interface=<bridge>` when the bridge is not in that
+zone. The binding is runtime only (the bridge itself is temporary), and
+`firewall-cmd --reload` drops runtime bindings; checking on every attach,
+plus once for all existing bridges at daemon start and on SIGHUP, restores
+it. Before a bridge is deleted it is removed from the zone if it is still
+in ours. Exit status 252 (firewalld not running) is silently ignored.
+
 ## Concurrency
 
 The main process only accepts connections. Each connection is handled in a

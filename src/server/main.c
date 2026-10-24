@@ -25,6 +25,7 @@
 #include "../common/log.h"
 #include "dnsout.h"
 #include "handler.h"
+#include "firewalld.h"
 #include "netset.h"
 #include "nft.h"
 
@@ -191,6 +192,7 @@ static int prepare_runtime(const struct tr_config *cfg)
 	}
 	nft_apply(cfg);
 	hosts_refresh_all(cfg);
+	fwd_bind_all(cfg);   /* re-establish firewalld zones of existing bridges */
 	return 0;
 }
 

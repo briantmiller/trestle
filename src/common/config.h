@@ -71,6 +71,7 @@ struct tr_network {
 	struct strv allow_inbound_from;/* CIDRs */
 	struct strv allow_outbound_to; /* CIDRs */
 	struct strv nft_rules;         /* raw rules appended to the network's forward chain */
+	char firewalld_zone[64];       /* put the bridge into this firewalld zone ("" = no) */
 
 	/* hook scripts */
 	char create_script[PATH_MAX];
@@ -117,6 +118,9 @@ struct tr_config {
 	char nft_binary[PATH_MAX];
 	char nft_table[64];
 	bool firewall_cleanup;
+
+	/* firewalld (per-network firewalld_zone) */
+	char firewall_cmd[PATH_MAX];
 
 	/* NetworkManager: mark bridges trestle creates as unmanaged */
 	enum tr_nm_mode networkmanager;

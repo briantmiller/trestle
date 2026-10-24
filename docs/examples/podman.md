@@ -88,3 +88,4 @@ sudo trestled -t      # shows the nftables ruleset that will be loaded
 | `host interface trv… already exists` | the same user already runs a container with that name on that network |
 | `refusing to talk to /tmp/trestle.sock` | the socket is not served by trestled (daemon down and someone else created the file?) |
 | `cannot connect to trestled` | daemon not running |
+| containers can't resolve each other (aardvark-dns) | with firewalld, set `firewalld_zone = trusted` for the network; the default zone blocks DNS to the bridge |

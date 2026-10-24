@@ -31,6 +31,13 @@ for t in ip unshare su useradd nft; do
 	command -v $t >/dev/null || { echo "missing tool: $t"; exit 77; }
 done
 
+# firewalld checks run when a firewalld is reachable (override the client
+# with TRESTLE_IT_FIREWALL_CMD)
+FWC=${TRESTLE_IT_FIREWALL_CMD:-/usr/bin/firewall-cmd}
+FWOK=0
+if [ -x "$FWC" ] && "$FWC" --state >/dev/null 2>&1; then FWOK=1; fi
+fwzone() { "$FWC" --get-zone-of-interface="$1" 2>/dev/null; }
+
 cleanup() {
 	[ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null && wait "$SERVER_PID" 2>/dev/null
 	[ -f "$IT/fake-aardvark.pid" ] && kill "$(cat "$IT/fake-aardvark.pid")" 2>/dev/null
@@ -87,10 +94,12 @@ nft_table = trestleit
 aardvark_binary = $IT/bin/aardvark-dns
 aardvark_dir = $IT/aardvark
 networkmanager = yes
+firewall_cmd = $FWC
 nmcli_binary = $IT/bin/nmcli
 
 [network:itnet]
 users = root, $U1, @$GRP, !nobody
+firewalld_zone = trusted
 subnet = 10.231.0.1/24
 mtu = 1400
 hosts_file = yes
@@ -113,6 +122,7 @@ script_on_error = fail
 
 [network:*]
 users = root, $U1
+firewalld_zone = trusted
 subnet_pool = 10.240.0.0/16
 subnet_prefix = 24
 hosts_file = yes
@@ -192,12 +202,19 @@ contains "new bridge marked unmanaged in NetworkManager" "$(cat $IT/nmcli.log 2>
 contains "bridge address" "$(ip -4 addr show "$BR")" "10.231.0.1/24"
 contains "veth enslaved to bridge" "$(ip link show "$VETH")" "master $BR"
 contains "veth alias" "$(ip link show "$VETH")" "alias trestle:root.default-web.itnet"
+if [ $FWOK = 1 ]; then
+	contains "bridge put into firewalld zone trusted" "$(fwzone $BR)" "trusted"
+	"$FWC" --reload >/dev/null    # drops runtime interface bindings
+	if [ "$(fwzone $BR)" = trusted ]; then bad "firewalld reload removed the binding (sanity)"
+	else ok "firewalld reload removed the binding (sanity)"; fi
+fi
 contains "MTU applied" "$(ip netns exec trit1 ip link show eth0)" "mtu 1400"
 contains "container address" "$(ip netns exec trit1 ip -4 addr show eth0)" "10.231.0.2/24"
 contains "container default route" "$(ip netns exec trit1 ip route)" "default via 10.231.0.1"
 
 out=$(cni ADD pod2 /var/run/netns/trit2 eth0 "K8S_POD_NAMESPACE=prod;K8S_POD_NAME=db;IP=10.231.0.77")
 contains "static IP via CNI_ARGS" "$out" "10.231.0.77/24"
+[ $FWOK = 1 ] && contains "zone restored on next attach after firewalld reload" "$(fwzone $BR)" "trusted"
 out=$(cni ADD pod3 /var/run/netns/trit3 eth0 "K8S_POD_NAME=x;IP=10.231.0.77")
 contains "static IP conflict rejected" "$out" "already in use"
 out=$(cni ADD pod4 /var/run/netns/trit3 eth0 "K8S_POD_NAMESPACE=default;K8S_POD_NAME=web")
@@ -350,6 +367,7 @@ WBR=tbr$(printf wild1 | md5sum | cut -c1-12)
 out=$(cni ADD w1 /var/run/netns/trit3 ew1 "K8S_POD_NAME=w1" "$WNS")
 contains "unconfigured network accepted through [network:*]" "$out" '"address":"10.240.0.2/24","gateway":"10.240.0.1"'
 check "catch-all network got its own bridge" ip link show "$WBR"
+[ $FWOK = 1 ] && contains "[network:*] bridge in its firewalld zone" "$(fwzone $WBR)" "trusted"
 contains "bridge has the first pool subnet" "$(ip -4 addr show $WBR)" "10.240.0.1/24"
 contains "nftables masquerade for the new subnet" "$(nft list table inet trestleit)" "ip saddr 10.240.0.0/24"
 contains "hosts entry for catch-all network" "$(cat $IT/hosts)" "root.w1.wild1.trestle"
@@ -414,6 +432,10 @@ out=$(cni DEL pod2 "" eth0 "K8S_POD_NAMESPACE=prod;K8S_POD_NAME=db"; echo "rc=$?
 contains "DEL is idempotent" "$out" "rc=0"
 check "veth removed" bash -c "! ip link show $VETH"
 check "bridge removed after last container" bash -c "! ip link show $BR"
+if [ $FWOK = 1 ]; then
+	if "$FWC" --zone=trusted --list-interfaces | grep -qw "$BR"; then bad "removed bridge taken out of firewalld zone"
+	else ok "removed bridge taken out of firewalld zone"; fi
+fi
 if grep -q "trestle managed" "$IT/hosts"; then bad "hosts block removed"; else ok "hosts block removed"; fi
 check "no IP leases left" bash -c "[ -z \"\$(ls $IT/state/ipam/itnet)\" ]"
 

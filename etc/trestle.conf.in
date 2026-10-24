@@ -46,6 +46,9 @@
 #networkmanager = auto
 #nmcli_binary = /usr/bin/nmcli
 
+# firewall-cmd used for the per-network firewalld_zone option
+#firewall_cmd = /usr/bin/firewall-cmd
+
 # aardvark-dns used for Netavark networks with aardvark_dns = yes
 #aardvark_binary = @AARDVARK_BINARY@
 #aardvark_dir = /run/trestle/aardvark-dns
@@ -101,6 +104,10 @@
 #allow_inbound_from = 192.168.1.0/24
 #allow_outbound_to = 10.20.0.0/16
 #nft_rule = ip daddr 169.254.169.254 drop
+# firewalld: put the bridge into this zone (runtime; re-checked on every
+# attach, so it survives "firewall-cmd --reload"). Without it the bridge is
+# in the default zone, which usually blocks DNS (aardvark-dns) to the bridge.
+#firewalld_zone = trusted
 #
 # Hook scripts (root-owned, not writable by group/others). They get the
 # event as $1 and TRESTLE_* environment variables: network, bridge,

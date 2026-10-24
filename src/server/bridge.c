@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #include "../common/log.h"
+#include "firewalld.h"
 #include "nm.h"
 #include "state.h"
 
@@ -158,6 +159,9 @@ int bridge_ensure(int nlfd, const struct tr_config *cfg, const struct tr_network
 			return -1;
 		}
 	}
+	/* firewalld zone: checked every time, a firewalld reload drops it */
+	fwd_bind(cfg, net);
+
 	if (net->has_subnet) {
 		r = nl_addr_has(nlfd, l.ifindex, net->gateway, NULL);
 		if (r == 0) {
@@ -213,6 +217,7 @@ void bridge_maybe_remove(int nlfd, const struct tr_config *cfg, const struct tr_
 		return;
 	if (c.uplink)
 		nl_set_master(nlfd, c.uplink, 0);
+	fwd_unbind(cfg, net);
 	int r = nl_del_link(nlfd, l.ifindex);
 	if (r) {
 		log_warn("cannot delete bridge %s: %s", net->bridge, strerror(-r));

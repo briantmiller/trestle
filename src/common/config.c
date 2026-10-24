@@ -51,6 +51,7 @@ void config_defaults(struct tr_config *c)
 	tr_strlcpy(c->aardvark_dir, "/run/trestle/aardvark-dns", sizeof(c->aardvark_dir));
 	c->aardvark_port = 53;
 	c->networkmanager = TR_NM_AUTO;
+	tr_strlcpy(c->firewall_cmd, "/usr/bin/firewall-cmd", sizeof(c->firewall_cmd));
 	tr_strlcpy(c->nmcli_binary, "/usr/bin/nmcli", sizeof(c->nmcli_binary));
 }
 
@@ -238,6 +239,10 @@ static int set_global(struct tr_config *c, const char *key, const char *val,
 			c->networkmanager = b ? TR_NM_YES : TR_NM_NO;
 		else
 			return seterr(errbuf, errlen, "%s:%d: networkmanager must be auto, yes or no", fname, line);
+	} else if (!strcmp(key, "firewall_cmd")) {
+		if (val[0] != '/')
+			return seterr(errbuf, errlen, "%s:%d: firewall_cmd must be an absolute path", fname, line);
+		CPY(c->firewall_cmd);
 	} else if (!strcmp(key, "nmcli_binary")) {
 		if (val[0] != '/')
 			return seterr(errbuf, errlen, "%s:%d: nmcli_binary must be an absolute path", fname, line);
@@ -386,6 +391,10 @@ static int set_network(struct tr_network *n, const char *key, const char *val,
 			n->script_fail = true;
 		else
 			return seterr(errbuf, errlen, "%s:%d: script_on_error must be ignore or fail", fname, line);
+	} else if (!strcmp(key, "firewalld_zone")) {
+		if (*val && !tr_valid_hostname_label(val))
+			return seterr(errbuf, errlen, "%s:%d: invalid firewalld zone name '%s'", fname, line, val);
+		CPY(n->firewalld_zone);
 	} else if (!strcmp(key, "nft_rule")) {
 		/* repeatable, accumulates across files */
 		if (strchr(val, '\n') || strchr(val, ';') || strchr(val, '{') || strchr(val, '}'))
