@@ -123,13 +123,18 @@ optional_policy(`
 
 # NetworkManager: read connection profiles and run
 # "nmcli device set <bridge> managed no" (D-Bus) for bridges trestle creates
+# (raw rules on the types: the reading interfaces are named differently in
+# the reference policy and in Fedora/RHEL, but the types are the same)
 optional_policy(`
-	networkmanager_read_etc_files(trestled_t)
 	networkmanager_dbus_chat(trestled_t)
 	dbus_system_bus_client(trestled_t)
 	gen_require(`
-		type NetworkManager_var_run_t;
+		type NetworkManager_etc_t, NetworkManager_etc_rw_t, NetworkManager_var_run_t;
 	')
+	list_dirs_pattern(trestled_t, NetworkManager_etc_t, NetworkManager_etc_t)
+	read_files_pattern(trestled_t, NetworkManager_etc_t, NetworkManager_etc_t)
+	list_dirs_pattern(trestled_t, NetworkManager_etc_t, NetworkManager_etc_rw_t)
+	read_files_pattern(trestled_t, NetworkManager_etc_rw_t, NetworkManager_etc_rw_t)
 	list_dirs_pattern(trestled_t, NetworkManager_var_run_t, NetworkManager_var_run_t)
 	read_files_pattern(trestled_t, NetworkManager_var_run_t, NetworkManager_var_run_t)
 ')
