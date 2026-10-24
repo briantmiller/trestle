@@ -62,9 +62,10 @@ across user namespaces.
 .TP
 .B create
 Called by \fBpodman network create \-d trestle\fR. The network must be
-configured in trestle and the user permitted. The bridge is created and the
-returned configuration carries the bridge name, the subnet (when
-\fBpodman_ipam=host-local\fR) and the IPAM driver.
+configured in trestle and the user permitted; nothing is created on the
+host. The returned configuration carries the bridge name, the subnet (when
+\fBpodman_ipam=host-local\fR) and the IPAM driver. The bridge itself is
+created when the first container attaches and removed with the last one.
 .TP
 .BI setup " netns"
 Creates the veth pair, assigns the address and default route and prints the

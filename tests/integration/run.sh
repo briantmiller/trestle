@@ -330,13 +330,21 @@ contains "user B teardown" "$out" "rc=0"
 if grep -q aaaa1111 "$AFILE" 2>/dev/null; then bad "aardvark entry removed"; else ok "aardvark entry removed"; fi
 if grep -q "$U1" "$IT/hosts"; then bad "hosts entry removed"; else ok "hosts entry removed"; fi
 
+rm -f "$HO/create-network.env"
 out=$(echo '{"name":"itnet","id":"abc","driver":"trestle","network_interface":"","subnets":[],"ipv6_enabled":false,"internal":false,"dns_enabled":false,"ipam_options":{"driver":"host-local"},"options":{}}' > "$IT/create.json"; chmod 644 "$IT/create.json"; su $U1 -s /bin/sh -c "TRESTLE_CONFIG=$IT/trestle.conf $IT/bin/trestle create < $IT/create.json")
 contains "create fills bridge name" "$out" "\"network_interface\":\"$BR\""
-contains "netavark create hook: podman network id" "$(cat $HO/create-network.env)" "TRESTLE_PODMAN_NETWORK_ID=abc"
-contains "netavark create hook: user" "$(cat $HO/create-network.env)" "TRESTLE_USER=$U1"
 contains "create sets ipam none" "$out" '"ipam_options":{"driver":"none"}'
 out=$(echo '{"name":"itnet","id":"abc","driver":"trestle","subnets":[{"subnet":"192.168.0.0/24"}]}' | "$IT/bin/trestle" create)
 contains "create rejects conflicting subnet" "$out" "conflicts with the trestle subnet"
+# create is only a check: a network nobody uses leaves nothing on the host
+FRESHBR=tbr$(printf itfail | md5sum | cut -c1-12)
+echo '{"name":"itfail","id":"f1","driver":"trestle","network_interface":"","subnets":[],"ipv6_enabled":false,"internal":false,"dns_enabled":false,"ipam_options":{"driver":"none"},"options":{}}' > "$IT/fresh.json"; chmod 644 "$IT/fresh.json"
+out=$("$IT/bin/trestle" create < "$IT/fresh.json")
+contains "create allowed for a permitted user" "$out" "\"network_interface\":\"$FRESHBR\""
+check "create does not create the bridge" bash -c "! ip link show $FRESHBR"
+check "create runs no create hook (itnet has create_script)" bash -c "! test -e $HO/create-network.env"
+out=$(su $U3 -s /bin/sh -c "TRESTLE_CONFIG=$IT/trestle.conf $IT/bin/trestle create < $IT/fresh.json")
+contains "create refused for a user without permission" "$out" "not permitted"
 out=$("$IT/bin/trestle" info)
 contains "info api_version" "$out" '"api_version":"1.0.0"'
 

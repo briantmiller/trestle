@@ -425,7 +425,7 @@ int ipam_foreach(const char *state_dir, const char *network, lease_cb cb, void *
 	closedir(d);
 	r = 0;
 	for (size_t i = 0; i < names.n && !r; i++) {
-		uint32_t ip;
+		uint32_t ip = 0;
 		char owner[256];
 		tr_parse_ipv4(names.v[i], &ip);
 		if (lease_owner(dir, ip, owner, sizeof(owner)) == 0)

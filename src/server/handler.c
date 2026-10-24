@@ -240,12 +240,11 @@ static int run_hook(struct hctx *h, const char *script, const struct hook_info *
 	return 0;
 }
 
-static int run_create_hook(struct hctx *h, bool bridge_created, const char *podman_id)
+static int run_create_hook(struct hctx *h, bool bridge_created)
 {
 	struct hook_info hi;
 	hook_base(h, &hi, "create");
 	hi.bridge_created = bridge_created;
-	hi.podman_network_id = podman_id;
 	/* the network event carries no container details */
 	hi.container_id = hi.container_name = hi.container_ifname = NULL;
 	hi.aliases = NULL;
@@ -383,7 +382,7 @@ static int do_attach(struct hctx *h, char **out)
 		return -1;
 	}
 	/* a network comes into existence on the host when its bridge is made */
-	if (br_created && run_create_hook(h, true, NULL) < 0)
+	if (br_created && run_create_hook(h, true) < 0)
 		return -1;
 
 	if (state_load(cfg->state_dir, n->name, h->req.container_id, &existing) == 0) {
@@ -749,15 +748,10 @@ static int do_create(struct hctx *h, char **out)
 		return failf(h, 0, "network %s uses bridge %s (from trestle configuration), not %s",
 			     n->name, n->bridge, json_object_get_string(v));
 
-	bool br_created = false;
-	int br = bridge_ensure(h->nlfd, h->cfg, n, &br_created, h->err, sizeof(h->err));
-	if (br < 0)
-		return -1;
-	json_object *idv;
-	const char *podman_id = json_object_object_get_ex(in, "id", &idv) ? json_object_get_string(idv) : NULL;
-	if (run_create_hook(h, br_created, podman_id) < 0)
-		return -1;
-
+	/* "podman network create" only checks that the user may use the network
+	 * and fills in its configuration. The bridge is created by the first
+	 * container that attaches (and removed with the last one), so a network
+	 * nobody uses leaves nothing behind on the host. */
 	json_object_object_add(in, "network_interface", json_object_new_string(n->bridge));
 
 	json_object *subnets = NULL;
@@ -798,7 +792,8 @@ static int do_create(struct hctx *h, char **out)
 	json_object_object_add(in, "ipam_options", ipam);
 
 	*out = strdup(json_object_to_json_string_ext(in, JSON_C_TO_STRING_PLAIN | JSON_C_TO_STRING_NOSLASHESCAPE));
-	log_info("netavark create: user %s created podman network %s (bridge %s)", h->peer.user, n->name, n->bridge);
+	log_info("netavark create: user %s may use network %s (bridge %s is created with the first container)",
+		 h->peer.user, n->name, n->bridge);
 	return 0;
 }
 

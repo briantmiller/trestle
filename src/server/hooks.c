@@ -78,7 +78,6 @@ void hook_build_env(const struct hook_info *hi, struct strv *env)
 		setenv_kv(env, "TRESTLE_BRIDGE_IP_CIDR", b);
 		setenv_num(env, "TRESTLE_PREFIX", n->prefix);
 	}
-	setenv_opt(env, "TRESTLE_PODMAN_NETWORK_ID", hi->podman_network_id);
 
 	/* caller */
 	setenv_opt(env, "TRESTLE_USER", hi->user);

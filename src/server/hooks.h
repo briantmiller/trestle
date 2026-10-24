@@ -34,7 +34,6 @@ struct hook_info {
 	const struct strv *aliases;
 	const char *k8s_pod_name;
 	const char *k8s_pod_namespace;
-	const char *podman_network_id;
 
 	const char *host_ifname;
 	const char *container_ifname;

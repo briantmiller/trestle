@@ -257,7 +257,7 @@ by the request handler while it holds the state lock:
 
 | Event | When | Container data |
 |---|---|---|
-| create | Netavark `create`, and whenever trestle creates the bridge | no |
+| create | whenever trestle creates the bridge (first container to attach; Netavark `create` creates nothing) | no |
 | setup | after a successful attach (links, address, record, DNS) | yes, plus netns as fd 3 |
 | teardown | before the host veth is deleted | yes (from the attachment record) |
 

@@ -191,6 +191,11 @@ int gc_run(const struct tr_config *cfg, int nlfd, const struct gc_filter *f, boo
 		if (c.changed && net) {
 			dns_refresh(cfg, net);
 			bridge_maybe_remove(nlfd, cfg, net);
+		} else if (!f->cni && net && !dry_run) {
+			/* an empty bridge trestle created (e.g. by "podman network
+			 * create" before 0.2) has no reason to exist; it is only
+			 * removed if it has no ports and nothing else claims it */
+			bridge_maybe_remove(nlfd, cfg, net);
 		}
 		any |= c.changed;
 		strv_clear(&c.live);

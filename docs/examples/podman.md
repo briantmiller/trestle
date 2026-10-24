@@ -38,7 +38,9 @@ podman network inspect dev     # network_interface = tbr…, ipam driver none
 ```
 
 The network name must match a `[network:NAME]` section. If the
-user is not permitted, `create` fails with a clear message.
+user is not permitted, `create` fails with a clear message. Creating the
+network only checks this; the bridge appears when the first container
+starts on it and disappears with the last one.
 
 ## 3. Run containers
 

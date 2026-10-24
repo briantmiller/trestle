@@ -305,6 +305,18 @@ check "live attachments untouched" test -f "$IT/state/attachments/sec/fxa1"
 if su $U1 -s /bin/sh -c "cat $IT/state/attachments/iso/iso1aaaa" >/dev/null 2>&1; then bad "records stay private"; else ok "records stay private"; fi
 if su $U1 -s /bin/sh -c "ls $IT/state/ipam/sec" >/dev/null 2>&1; then bad "leases stay private"; else ok "leases stay private"; fi
 
+# an empty bridge trestle created earlier (e.g. by "podman network create"
+# in 0.1) is removed by the sweep; a bridge trestle did not create is not
+OPENBR=tbr$(printf open | md5sum | cut -c1-12)
+ip link add "$OPENBR" type bridge 2>/dev/null; mkdir -p "$IT/state/bridges"; printf 'network=open\n' > "$IT/state/bridges/$OPENBR"
+SOLOBRX=tbr$(printf tiny | md5sum | cut -c1-12)
+ip link show "$SOLOBRX" >/dev/null 2>&1 || ip link add "$SOLOBRX" type bridge
+rm -f "$IT/state/bridges/$SOLOBRX"
+ctl gc >/dev/null
+check "sweep removes an empty bridge trestle created" bash -c "! ip link show $OPENBR"
+check "...but not a bridge trestle did not create" ip link show "$SOLOBRX"
+ip link del "$SOLOBRX" 2>/dev/null
+
 G=$(cni ADD gc2 /var/run/netns/fxg eth0 K8S_POD_NAME=g2 sec)
 ip link del "$(veth sec:root:g2)"
 for _ in $(seq 25); do [ -e "$IT/state/attachments/sec/gc2" ] || break; sleep 1; done

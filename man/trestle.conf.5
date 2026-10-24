@@ -250,10 +250,11 @@ in the host's forward path, so routing through the host does not get
 around it.
 .TP
 .B create_script
-Script run when the network is created: on \fBpodman network create\fR
-(Netavark \fBcreate\fR) and whenever trestle creates the network's bridge
-(for example on the first CNI ADD, or again after the bridge was removed
-because the last container left).
+Script run when trestle creates the network's bridge, which happens when
+the first container attaches (and again after the bridge was removed
+because the last container left). \fBpodman network create\fR (Netavark
+\fBcreate\fR) only checks the request and creates nothing, so it does not
+run this script.
 .TP
 .B setup_script
 Script run after a container or pod has been attached (veth, address,
@@ -331,9 +332,6 @@ Addressing of the network (with \fBsubnet\fR).
 .TP
 .BR TRESTLE_MTU ", " TRESTLE_UPLINK
 When configured.
-.TP
-.B TRESTLE_PODMAN_NETWORK_ID
-Podman network id (create event from Netavark).
 .TP
 .BR TRESTLE_USER ", " TRESTLE_UID ", " TRESTLE_GID ", " TRESTLE_ROOTLESS
 The user running the container (from the socket credentials) and 1 when the

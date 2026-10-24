@@ -42,6 +42,13 @@
   all the profile locations (`/usr/lib/NetworkManager`, ifcfg files,
   `/run/systemd/network`, libvirt networks), and NetworkManager / polkit may
   identify trestled as the caller of `nmcli device set … managed no`.
+* `podman network create` (Netavark `create`) only checks that the user may
+  use the network and returns its configuration; the bridge is created by
+  the first container that attaches and removed with the last one, so an
+  unused network leaves nothing on the host. The stale state sweep also
+  removes empty bridges trestle created earlier. `create_script` therefore
+  runs only when the bridge is created, and `TRESTLE_PODMAN_NETWORK_ID` is
+  gone.
 * Bridges trestle creates get a fixed MAC address, so the gateway MAC no
   longer changes when containers come and go.
 * `make fuzz` gains a DHCP parser target; new `tests/integration/features.sh`.

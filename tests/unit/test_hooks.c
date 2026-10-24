@@ -121,10 +121,10 @@ static void test_env(void)
 
 	/* network-level event without container information */
 	struct hook_info c = { .event = "create", .net = n, .user = "alice", .netns_fd = -1,
-			       .bridge_created = true, .podman_network_id = "2f25" };
+			       .bridge_created = true };
 	hook_build_env(&c, &env);
 	CHECK_STR(env_get(&env, "TRESTLE_BRIDGE_CREATED"), "1");
-	CHECK_STR(env_get(&env, "TRESTLE_PODMAN_NETWORK_ID"), "2f25");
+	CHECK(env_get(&env, "TRESTLE_PODMAN_NETWORK_ID") == NULL);
 	CHECK(env_get(&env, "TRESTLE_CONTAINER_ID") == NULL);
 	CHECK(env_get(&env, "TRESTLE_IP") == NULL);
 	CHECK(env_get(&env, "TRESTLE_FQDN") == NULL);
