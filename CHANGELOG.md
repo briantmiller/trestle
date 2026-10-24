@@ -29,3 +29,12 @@ Initial release.
   environment variables and the container netns passed as fd 3.
 * systemd unit, SELinux module, man pages, RPM / Debian / Arch packaging,
   unit and integration tests.
+* Input hardening from a security review (see `docs/SECURITY.md`): client
+  binary checked before the request is read; whole-request deadline and
+  `max_requests_per_user`; strict framing (one fd, no unknown flags, no NUL
+  bytes); strict JSON (no `\u0000`, no trailing data, wrong-typed members
+  rejected); no truncation of `CNI_ARGS` values; container ids must start
+  with a letter or digit; strict MAC and IP prefix parsing; control
+  characters rejected in paths and `CNI_ARGS` and escaped in logs.
+* `make fuzz` (libFuzzer harnesses) and `make security-test` (hostile client
+  against a live daemon).

@@ -14,6 +14,8 @@
 
 /* --- strings --------------------------------------------------------- */
 size_t tr_strlcpy(char *dst, const char *src, size_t size);
+bool tr_has_ctrl(const char *s);               /* any byte < 0x20 or 0x7f */
+bool tr_json_has_nul_escape(const char *json); /* \u0000 inside a JSON string */
 char *tr_trim(char *s);
 bool tr_streq(const char *a, const char *b);
 bool tr_parse_bool(const char *s, bool *out);

@@ -112,6 +112,7 @@ struct tr_config {
 	char hosts_path[PATH_MAX];
 	int log_level;
 	int request_timeout;           /* seconds */
+	int max_requests_per_user;     /* concurrent connections per non-root uid */
 	bool ip_forward;
 
 	/* nftables */

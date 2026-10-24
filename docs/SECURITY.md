@@ -14,7 +14,52 @@ request is treated as hostile until proven otherwise.
 | Namespace ownership | fd must be a netns, not the host netns, and (non-root) owned by a user namespace of the caller | Moving interfaces into the host or another user's container |
 | Ownership of attachments | teardown/DEL/CHECK compare the record's uid | One user detaching another user's container |
 | Naming | veth name includes the user name | Collisions between users |
+| Denial of service | whole request within `request_timeout` (not just each read); at most 64 handlers, `max_requests_per_user` (default 8) per non-root uid | One user keeping all handlers busy with stalled or dripping connections |
 | Server identity (client side) | peer uid root, socket owned by root, `/proc/<pid>/exe` (or process name inside a user namespace), optional SELinux type | A local user squatting `/tmp/trestle.sock` |
+
+### Input handling rules
+
+* The client binary check runs before a single byte of the request is
+  read, so arbitrary processes never reach the parsers.
+* Framing: magic, version, no unknown flag bits, length at most 1 MiB, exactly
+  one file descriptor iff the fd flag is set, no NUL bytes in the body.
+* JSON (the request and the embedded CNI / Netavark document): exactly one
+  object, no trailing data, no `\u0000` escapes anywhere (they would cut
+  values or keys at that point in C), json-c depth limit 32.
+* Every member is type-checked; a present member with the wrong type
+  (`"static_ips": "10.0.0.5"`, `"version": "1"`) is an error, never ignored.
+* Nothing is truncated to fit: over-long values (`CNI_ARGS` entries, IP
+  strings, names) are rejected, so a cut value can never turn into a different
+  valid one.
+* Names that become file names (network, container id) must start with a
+  letter or digit and only contain `[A-Za-z0-9_.-]`: no `.`, `..`, hidden or
+  option-like (`-x`) names. Interface names reject `/`, `:`, quotes,
+  backslashes, blanks and control characters.
+* `CNI_NETNS`, `CNI_ARGS`, `CNI_PATH` and the Netavark netns path must not
+  contain control characters; `CNI_ARGS` must be `KEY=VALUE;...`.
+* MAC addresses are parsed character by character (exactly `xx:xx:...`, hex
+  only, unicast); IPs are `inet_pton` IPv4 with an optional `/0`-`/32`.
+* Invalid aliases are dropped one by one, not passed on.
+* No shell is ever used; helper programs (`nft`, `nmcli`, `firewall-cmd`,
+  `aardvark-dns`, hooks) get fixed argument vectors, and the nftables ruleset
+  is built only from validated configuration.
+* Log messages escape control characters (`\x0a`), so client-supplied text
+  cannot forge log lines or journald priority prefixes.
+
+### Testing
+
+* `make fuzz` (clang): libFuzzer + ASan/UBSan harnesses for the CNI and
+  Netavark parsers, the daemon's request decoding, the wire framing, the
+  configuration parser + nftables generator and the hosts-file editor
+  (`tests/fuzz/`, `FUZZ_TIME=` seconds per target).
+* `make security-test` (root): starts a private daemon and runs about 100
+  hostile requests each as an allowed user, an unpermitted user and root
+  (`tests/security/`): malformed frames, wrong / extra / foreign file
+  descriptors, corrupt and deeply nested JSON, NUL bytes, wrong types,
+  path traversal, shell metacharacters and newlines in every field, slow
+  clients. It checks the daemon survives, answers each with an error and
+  leaves no interfaces, files, leases or DNS entries behind. Build the daemon
+  with `-fsanitize=address,undefined` to also catch memory errors.
 
 ### Limits of the client binary check
 
@@ -68,4 +113,4 @@ run in `trestled_t`; label them `trestle_script_exec_t` (default for
 
 ## Reporting
 
-Please report security problems privately to Brian <brian@email.com>.
+Please report security problems privately to Brian Miller <brianthomasmiller@gmail.com>.

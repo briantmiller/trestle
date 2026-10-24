@@ -44,16 +44,38 @@ enum trestle_log_target tlog_detect_target(int foreground)
 	return foreground ? TLOG_STDERR : TLOG_SYSLOG;
 }
 
+/* Escape control characters so client-supplied text in a message (a name,
+ * a path, an error echoed back) cannot forge extra log lines or journal
+ * priority prefixes. */
+static void escape_ctrl(const char *in, char *out, size_t outlen)
+{
+	static const char hex[] = "0123456789abcdef";
+	size_t o = 0;
+	for (; *in && o + 5 < outlen; in++) {
+		unsigned char c = (unsigned char)*in;
+		if ((c < 0x20 && c != '\t') || c == 0x7f) {
+			out[o++] = '\\';
+			out[o++] = 'x';
+			out[o++] = hex[c >> 4];
+			out[o++] = hex[c & 15];
+		} else {
+			out[o++] = (char)c;
+		}
+	}
+	out[o] = '\0';
+}
+
 void tlog(int prio, const char *fmt, ...)
 {
-	char buf[2048];
+	char raw[2048], buf[2048];
 	va_list ap;
 
 	if (prio > g_level)
 		return;
 	va_start(ap, fmt);
-	vsnprintf(buf, sizeof(buf), fmt, ap);
+	vsnprintf(raw, sizeof(raw), fmt, ap);
 	va_end(ap);
+	escape_ctrl(raw, buf, sizeof(buf));
 
 	switch (g_target) {
 	case TLOG_SYSLOG:

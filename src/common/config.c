@@ -43,6 +43,7 @@ void config_defaults(struct tr_config *c)
 	tr_strlcpy(c->hosts_path, "/etc/hosts", sizeof(c->hosts_path));
 	c->log_level = LOG_INFO;
 	c->request_timeout = 10;
+	c->max_requests_per_user = 8;
 	c->ip_forward = false;
 	tr_strlcpy(c->nft_binary, TRESTLE_NFT_BINARY, sizeof(c->nft_binary));
 	tr_strlcpy(c->nft_table, "trestle", sizeof(c->nft_table));
@@ -221,6 +222,10 @@ static int set_global(struct tr_config *c, const char *key, const char *val,
 		if (!tr_parse_int(val, 1, 600, &v))
 			return seterr(errbuf, errlen, "%s:%d: request_timeout must be 1-600", fname, line);
 		c->request_timeout = (int)v;
+	} else if (!strcmp(key, "max_requests_per_user")) {
+		if (!tr_parse_int(val, 1, 64, &v))
+			return seterr(errbuf, errlen, "%s:%d: max_requests_per_user must be 1-64", fname, line);
+		c->max_requests_per_user = (int)v;
 	} else if (!strcmp(key, "ip_forward")) {
 		BOOL(c->ip_forward);
 	} else if (!strcmp(key, "nft_binary")) {

@@ -50,7 +50,14 @@ Hosts file managed for networks with \fBhosts_file = yes\fR. Default
 error, warning, notice, info (default) or debug.
 .TP
 .B request_timeout
-Seconds a client may take to send its request. Default 10.
+Seconds a client may take to send its whole request. Connections that have
+not delivered it by then are closed. Default 10.
+.TP
+.B max_requests_per_user
+Connections one non-root user may have in flight at the same time (1\-64).
+Further connections from that user are closed at once, so one user cannot
+occupy all 64 request handlers. Root is only bound by the global limit.
+Default 8.
 .TP
 .B ip_forward
 Enable net.ipv4.ip_forward at start-up. Default no.

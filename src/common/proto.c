@@ -3,6 +3,7 @@
 #include "proto.h"
 
 #include <errno.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -99,6 +100,7 @@ int tr_recv_request(int sock, char **json_out, size_t *len_out, int *fd_out)
 		.msg_control = cm.buf, .msg_controllen = sizeof(cm.buf),
 	};
 	int fd = -1;
+	bool extra_fds = false;
 
 	*fd_out = -1;
 	*json_out = NULL;
@@ -121,13 +123,15 @@ int tr_recv_request(int sock, char **json_out, size_t *len_out, int *fd_out)
 			n = 4;
 		memcpy(fds, CMSG_DATA(c), n * sizeof(int));
 		for (size_t i = 0; i < n; i++) {
-			if (fd < 0)
+			if (fd < 0) {
 				fd = fds[i];
-			else
+			} else {
 				close(fds[i]);
+				extra_fds = true;
+			}
 		}
 	}
-	if (msg.msg_flags & MSG_CTRUNC) {
+	if ((msg.msg_flags & MSG_CTRUNC) || extra_fds) {
 		if (fd >= 0)
 			close(fd);
 		return -EBADMSG;
@@ -140,6 +144,8 @@ int tr_recv_request(int sock, char **json_out, size_t *len_out, int *fd_out)
 		err = -EPROTO;
 	if (!err && h.len > TR_MAX_PAYLOAD)
 		err = -EMSGSIZE;
+	if (!err && (h.flags & ~TR_REQ_FLAG_FD))
+		err = -EPROTO;     /* unknown flags: a newer client we do not understand */
 	if (!err && !!(h.flags & TR_REQ_FLAG_FD) != (fd >= 0))
 		err = -EBADMSG;
 	char *body = NULL;
@@ -157,6 +163,12 @@ int tr_recv_request(int sock, char **json_out, size_t *len_out, int *fd_out)
 		return err;
 	}
 	body[h.len] = '\0';
+	if (memchr(body, '\0', h.len)) {   /* would silently cut the JSON */
+		free(body);
+		if (fd >= 0)
+			close(fd);
+		return -EBADMSG;
+	}
 	*json_out = body;
 	*len_out = h.len;
 	*fd_out = fd;

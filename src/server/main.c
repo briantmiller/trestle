@@ -37,10 +37,43 @@ static volatile sig_atomic_t g_stop, g_reload;
 static int g_children;
 #define MAX_CHILDREN 64
 
+/* request handlers in flight and whose they are, for the per-user limit */
+static struct { pid_t pid; uid_t uid; } g_kids[MAX_CHILDREN];
+
+static void kid_add(pid_t pid, uid_t uid)
+{
+	for (int i = 0; i < MAX_CHILDREN; i++)
+		if (g_kids[i].pid == 0) {
+			g_kids[i].pid = pid;
+			g_kids[i].uid = uid;
+			g_children++;
+			return;
+		}
+}
+
+static void kid_del(pid_t pid)
+{
+	for (int i = 0; i < MAX_CHILDREN; i++)
+		if (g_kids[i].pid == pid) {
+			g_kids[i].pid = 0;
+			g_children--;
+			return;
+		}
+}
+
+static int kids_of(uid_t uid)
+{
+	int n = 0;
+	for (int i = 0; i < MAX_CHILDREN; i++)
+		n += g_kids[i].pid != 0 && g_kids[i].uid == uid;
+	return n;
+}
+
 static void reap_children(void)
 {
-	while (g_children > 0 && waitpid(-1, NULL, WNOHANG) > 0)
-		g_children--;
+	pid_t p;
+	while (g_children > 0 && (p = waitpid(-1, NULL, WNOHANG)) > 0)
+		kid_del(p);
 }
 
 static void on_signal(int sig)
@@ -377,8 +410,22 @@ int main(int argc, char **argv)
 		 * block others. Children serialize the actual work with a lock
 		 * on the state directory (see handler.c). */
 		reap_children();
+		struct ucred cr;
+		socklen_t crlen = sizeof(cr);
+		if (getsockopt(cfd, SOL_SOCKET, SO_PEERCRED, &cr, &crlen) < 0) {
+			close(cfd);
+			continue;
+		}
 		if (g_children >= MAX_CHILDREN) {
 			log_warn("too many concurrent requests (%d); rejecting connection", g_children);
+			close(cfd);
+			continue;
+		}
+		/* one user must not be able to take all handler slots (root, e.g.
+		 * the kubelet, is only bound by the global limit) */
+		if (cr.uid != 0 && kids_of(cr.uid) >= cfg.max_requests_per_user) {
+			log_warn("uid %u already has %d requests in flight; rejecting connection",
+				 (unsigned)cr.uid, kids_of(cr.uid));
 			close(cfd);
 			continue;
 		}
@@ -390,22 +437,22 @@ int main(int argc, char **argv)
 			signal(SIGINT, SIG_DFL);
 			signal(SIGHUP, SIG_IGN);
 			signal(SIGCHLD, SIG_DFL);
+			signal(SIGALRM, SIG_DFL);
 			handle_connection(&cfg, cfd);
 			close(cfd);
 			config_free(&cfg);
 			_exit(0);
 		}
-		if (pid < 0) {
-			log_warn("fork: %s; handling request inline", strerror(errno));
-			handle_connection(&cfg, cfd);
-		} else {
-			g_children++;
-		}
+		if (pid < 0)
+			log_warn("fork: %s; rejecting connection", strerror(errno));
+		else
+			kid_add(pid, cr.uid);
 		close(cfd);
 	}
 	/* let in-flight requests finish */
-	while (g_children > 0 && waitpid(-1, NULL, 0) > 0)
-		g_children--;
+	pid_t wp;
+	while (g_children > 0 && (wp = waitpid(-1, NULL, 0)) > 0)
+		kid_del(wp);
 
 	sd_notify("STOPPING=1");
 	log_info("shutting down");

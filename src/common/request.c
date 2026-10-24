@@ -2,6 +2,8 @@
 #define _GNU_SOURCE
 #include "request.h"
 
+#include <ctype.h>
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,14 +37,20 @@ bool tr_cni_version_supported(const char *v)
 	return false;
 }
 
-static json_object *parse_json_object(const char *text, char *err, size_t errlen)
+static json_object *parse_json_object(const char *text, char *err, size_t errlen);
+
+json_object *tr_json_parse_object(const char *text, const char *what, char *err, size_t errlen)
 {
 	enum json_tokener_error jerr;
 	json_tokener *tok;
 	json_object *o;
 
 	if (!text || !*text) {
-		fail(err, errlen, "no JSON received on stdin");
+		fail(err, errlen, "no JSON received on %s", what);
+		return NULL;
+	}
+	if (tr_json_has_nul_escape(text)) {
+		fail(err, errlen, "%s contains a NUL character (\\u0000)", what);
 		return NULL;
 	}
 	tok = json_tokener_new();
@@ -54,7 +62,7 @@ static json_object *parse_json_object(const char *text, char *err, size_t errlen
 	o = json_tokener_parse_ex(tok, text, (int)len);
 	jerr = json_tokener_get_error(tok);
 	if (!o || jerr != json_tokener_success) {
-		fail(err, errlen, "stdin is not valid JSON: %s",
+		fail(err, errlen, "%s is not valid JSON: %s", what,
 		     jerr == json_tokener_continue ? "unexpected end of input" : json_tokener_error_desc(jerr));
 		json_tokener_free(tok);
 		if (o)
@@ -71,7 +79,7 @@ static json_object *parse_json_object(const char *text, char *err, size_t errlen
 	for (; off < len; off++)
 		if (!strchr(" \t\r\n", text[off])) {
 			json_object_put(o);
-			fail(err, errlen, "stdin contains trailing data after the JSON document");
+			fail(err, errlen, "%s contains trailing data after the JSON document", what);
 			return NULL;
 		}
 	if (!json_object_is_type(o, json_type_object)) {
@@ -80,6 +88,11 @@ static json_object *parse_json_object(const char *text, char *err, size_t errlen
 		return NULL;
 	}
 	return o;
+}
+
+static json_object *parse_json_object(const char *text, char *err, size_t errlen)
+{
+	return tr_json_parse_object(text, "stdin", err, errlen);
 }
 
 static const char *jstr(json_object *o, const char *key)
@@ -98,12 +111,32 @@ static json_object *jobj(json_object *o, const char *key, json_type t)
 	return v;
 }
 
-/* "K=V;K2=V2" */
-static void cni_args_get(const char *args, const char *key, char *out, size_t outlen)
+/* CNI_ARGS must be "K=V;K2=V2": every entry a non-empty [A-Za-z0-9_] key,
+ * '=', and a value (libcni rejects other forms too) */
+static bool cni_args_valid(const char *args)
+{
+	if (!args || !*args)
+		return true;
+	for (const char *p = args;;) {
+		const char *k = p;
+		while (isalnum((unsigned char)*p) || *p == '_')
+			p++;
+		if (p == k || *p != '=')
+			return false;
+		p = strchr(p, ';');
+		if (!p)
+			return true;
+		p++;
+	}
+}
+
+/* "K=V;K2=V2"; returns -1 if the value does not fit (never truncate: a
+ * shortened name or address would be a different, possibly valid one) */
+static int cni_args_get(const char *args, const char *key, char *out, size_t outlen)
 {
 	out[0] = '\0';
 	if (!args)
-		return;
+		return 0;
 	size_t kl = strlen(key);
 	const char *p = args;
 	while (*p) {
@@ -112,25 +145,51 @@ static void cni_args_get(const char *args, const char *key, char *out, size_t ou
 		if (l > kl && !strncmp(p, key, kl) && p[kl] == '=') {
 			size_t vl = l - kl - 1;
 			if (vl >= outlen)
-				vl = outlen - 1;
+				return -1;
 			memcpy(out, p + kl + 1, vl);
 			out[vl] = '\0';
-			return;
+			return 0;
 		}
 		if (!end)
 			break;
 		p = end + 1;
 	}
+	return 0;
+}
+
+/* Optional member of a given type: 0 = absent (*out NULL), 1 = present,
+ * -1 = present with another type (corrupt input; never silently ignored). */
+static int jopt(json_object *o, const char *key, json_type t, json_object **out)
+{
+	*out = NULL;
+	if (!o || !json_object_object_get_ex(o, key, out) || !*out ||
+	    json_object_is_type(*out, json_type_null)) {
+		*out = NULL;
+		return 0;
+	}
+	if (!json_object_is_type(*out, t)) {
+		*out = NULL;
+		return -1;
+	}
+	return 1;
 }
 
 static int add_static_ip(struct tr_request *r, const char *s, char *err, size_t errlen)
 {
 	char tmp[64];
 	uint32_t a;
+	if (strlen(s) >= sizeof(tmp))
+		return fail(err, errlen, "requested IP is too long");
 	tr_strlcpy(tmp, s, sizeof(tmp));
 	char *slash = strchr(tmp, '/');
-	if (slash)
+	if (slash) {
+		/* "a.b.c.d/N" is accepted (CNI runtimeConfig), N must be a prefix */
+		char *end;
 		*slash = '\0';
+		long p = strtol(slash + 1, &end, 10);
+		if (!isdigit((unsigned char)slash[1]) || *end || p < 0 || p > 32)
+			return fail(err, errlen, "requested IP '%s' has an invalid prefix length", s);
+	}
 	if (!tr_parse_ipv4(tmp, &a))
 		return fail(err, errlen, "requested IP '%s' is not a valid IPv4 address", s);
 	if (!strv_contains(&r->static_ips, tmp))
@@ -181,6 +240,8 @@ int tr_parse_cni(tr_env_fn getenv_fn, void *ctx, const char *stdin_text,
 
 	if (!cid || !tr_valid_container_id(cid))
 		return fail(err, errlen, "CNI_CONTAINERID is missing or invalid");
+	if (tr_has_ctrl(netns) || tr_has_ctrl(args) || tr_has_ctrl(path))
+		return fail(err, errlen, "CNI_NETNS, CNI_ARGS and CNI_PATH must not contain control characters");
 	tr_strlcpy(out->container_id, cid, sizeof(out->container_id));
 	if (!ifname || !tr_valid_ifname(ifname))
 		return fail(err, errlen, "CNI_IFNAME is missing or invalid");
@@ -224,10 +285,16 @@ int tr_parse_cni(tr_env_fn getenv_fn, void *ctx, const char *stdin_text,
 
 	/* container name: <namespace>-<pod> from CNI_ARGS, else short container id */
 	char pod[TR_MAX_NAME + 1], ns[TR_MAX_NAME + 1], ip[64], mac[32];
-	cni_args_get(args, "K8S_POD_NAME", pod, sizeof(pod));
-	cni_args_get(args, "K8S_POD_NAMESPACE", ns, sizeof(ns));
-	cni_args_get(args, "IP", ip, sizeof(ip));
-	cni_args_get(args, "MAC", mac, sizeof(mac));
+	if (!cni_args_valid(args)) {
+		*cni_code = CNI_ERR_INVALID_ENV;
+		return fail(err, errlen, "CNI_ARGS is malformed (expected KEY=VALUE;KEY=VALUE)");
+	}
+	if (cni_args_get(args, "K8S_POD_NAME", pod, sizeof(pod)) < 0 ||
+	    cni_args_get(args, "K8S_POD_NAMESPACE", ns, sizeof(ns)) < 0 ||
+	    cni_args_get(args, "IP", ip, sizeof(ip)) < 0 || cni_args_get(args, "MAC", mac, sizeof(mac)) < 0) {
+		*cni_code = CNI_ERR_INVALID_ENV;
+		return fail(err, errlen, "a CNI_ARGS value is too long");
+	}
 	if (pod[0] && tr_valid_container_name(pod))
 		tr_strlcpy(out->k8s_pod_name, pod, sizeof(out->k8s_pod_name));
 	if (ns[0] && tr_valid_container_name(ns))
@@ -248,8 +315,10 @@ int tr_parse_cni(tr_env_fn getenv_fn, void *ctx, const char *stdin_text,
 		for (char *save = NULL, *t = strtok_r(ip, ",", &save); t; t = strtok_r(NULL, ",", &save))
 			if (add_static_ip(out, t, err, errlen) < 0)
 				return -1;
-	json_object *rc = jobj(out->input, "runtimeConfig", json_type_object);
-	json_object *ips = jobj(rc, "ips", json_type_array);
+	json_object *rc, *ips, *rmacv;
+	if (jopt(out->input, "runtimeConfig", json_type_object, &rc) < 0 ||
+	    jopt(rc, "ips", json_type_array, &ips) < 0 || jopt(rc, "mac", json_type_string, &rmacv) < 0)
+		return fail(err, errlen, "runtimeConfig, runtimeConfig.ips or runtimeConfig.mac has the wrong type");
 	for (size_t i = 0; ips && i < json_object_array_length(ips); i++) {
 		json_object *e = json_object_array_get_idx(ips, i);
 		if (!json_object_is_type(e, json_type_string))
@@ -304,7 +373,7 @@ int tr_parse_netavark(int nargs, char *const *args, const char *stdin_text,
 			return fail(err, errlen, "netns path argument is missing");
 		if (nargs > 2)
 			return fail(err, errlen, "too many arguments for %s", cmd);
-		if (args[1][0] != '/' || strlen(args[1]) >= sizeof(out->netns_path))
+		if (args[1][0] != '/' || tr_has_ctrl(args[1]) || strlen(args[1]) >= sizeof(out->netns_path))
 			return fail(err, errlen, "netns path must be an absolute path");
 		tr_strlcpy(out->netns_path, args[1], sizeof(out->netns_path));
 	}
@@ -346,7 +415,11 @@ int tr_parse_netavark(int nargs, char *const *args, const char *stdin_text,
 	tr_strlcpy(out->network, name, sizeof(out->network));
 	tr_strlcpy(out->ifname, ifn, sizeof(out->ifname));
 
-	json_object *ips = jobj(opts, "static_ips", json_type_array);
+	json_object *ips, *macv, *al;
+	if (jopt(opts, "static_ips", json_type_array, &ips) < 0 ||
+	    jopt(opts, "static_mac", json_type_string, &macv) < 0 ||
+	    jopt(opts, "aliases", json_type_array, &al) < 0)
+		return fail(err, errlen, "static_ips, static_mac or aliases in network_options has the wrong type");
 	for (size_t i = 0; ips && i < json_object_array_length(ips); i++) {
 		json_object *e = json_object_array_get_idx(ips, i);
 		if (!json_object_is_type(e, json_type_string))
@@ -364,7 +437,6 @@ int tr_parse_netavark(int nargs, char *const *args, const char *stdin_text,
 			return fail(err, errlen, "static_mac '%s' is invalid", mac);
 		tr_strlcpy(out->static_mac, mac, sizeof(out->static_mac));
 	}
-	json_object *al = jobj(opts, "aliases", json_type_array);
 	for (size_t i = 0; al && i < json_object_array_length(al); i++) {
 		json_object *e = json_object_array_get_idx(al, i);
 		if (json_object_is_type(e, json_type_string) &&

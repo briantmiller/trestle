@@ -31,6 +31,9 @@
 #hosts_path = /etc/hosts
 #log_level = info
 #request_timeout = 10
+# Concurrent connections one non-root user may have open (1-64); root is
+# only bound by the global limit of 64.
+#max_requests_per_user = 8
 
 # Set net.ipv4.ip_forward=1 at start-up (needed for routing/masquerade).
 #ip_forward = no

@@ -86,8 +86,10 @@ in ours. Exit status 252 (firewalld not running) is silently ignored.
 ## Concurrency
 
 The main process only accepts connections. Each connection is handled in a
-forked child (at most 64 at a time), so a client that connects and stalls
-cannot block other requests; it is dropped after `request_timeout`. Children
+forked child (at most 64 at a time, and at most `max_requests_per_user` for
+one non-root uid), so a client that connects and stalls cannot block other
+requests; a child that has not received the whole request within
+`request_timeout` is ended. Children
 read and authorize their request in parallel, then take an exclusive
 `flock` on `<state_dir>/state.lock` for the part that changes state (links,
 IPAM, records, DNS outputs). Configuration reloads happen in the main

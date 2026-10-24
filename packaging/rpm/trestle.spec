@@ -119,5 +119,5 @@ fi
 %ghost %verify(not md5 size mode mtime) %{_localstatedir}/lib/selinux/%{selinuxtype}/active/modules/200/%{modulename}
 
 %changelog
-* Fri Oct 23 2026 Brian <brian@email.com> - 0.1-1
+* Fri Oct 23 2026 Brian Miller <brianthomasmiller@gmail.com> - 0.1-1
 - Initial package

@@ -3,6 +3,7 @@
 #include "handler.h"
 
 #include <errno.h>
+#include <signal.h>
 #include <fcntl.h>
 #include <json-c/json.h>
 #include <stdarg.h>
@@ -99,14 +100,13 @@ static void mac_fmt(const uint8_t m[6], char out[18])
 
 static int decode_request(struct hctx *h, const char *wire)
 {
-	json_object *w = json_tokener_parse(wire);
-	if (!w || !json_object_is_type(w, json_type_object)) {
-		if (w)
-			json_object_put(w);
-		return failf(h, CNI_ERR_DECODE, "malformed request");
-	}
+	char perr[256];
+	json_object *w = tr_json_parse_object(wire, "request", perr, sizeof(perr));
+	if (!w)
+		return failf(h, CNI_ERR_DECODE, "malformed request: %s", perr);
 	json_object *v, *mode, *cmd, *argv, *env, *nspath, *nsfd, *rootless, *in;
-	int ok = json_object_object_get_ex(w, "version", &v) && json_object_get_int(v) == TR_PROTO_VERSION &&
+	int ok = json_object_object_get_ex(w, "version", &v) && json_object_is_type(v, json_type_int) &&
+		 json_object_get_int64(v) == TR_PROTO_VERSION &&
 		 json_object_object_get_ex(w, "mode", &mode) && json_object_is_type(mode, json_type_string) &&
 		 json_object_object_get_ex(w, "command", &cmd) && json_object_is_type(cmd, json_type_string) &&
 		 json_object_object_get_ex(w, "argv", &argv) && json_object_is_type(argv, json_type_array) &&
@@ -699,22 +699,30 @@ void handle_connection(const struct tr_config *cfg, int sock)
 		respond_error(&h);
 		return;
 	}
+	/* the connection must come from the trestle client binary; checked
+	 * before a single byte of the request is read or parsed */
+	if (peer_verify_client_binary(&h.peer, cfg->client_binary, h.err, sizeof(h.err)) < 0) {
+		h.cni_code = CNI_ERR_PLUGIN;
+		goto error;
+	}
+
+	/* the whole request must arrive within request_timeout (SO_RCVTIMEO
+	 * alone only limits each read, so a client dripping one byte at a
+	 * time could hold this handler forever) */
+	signal(SIGALRM, SIG_DFL);
+	alarm((unsigned)cfg->request_timeout);
 	r = tr_recv_request(sock, &wire, &wlen, &h.nsfd);
+	alarm(0);
 	if (r) {
-		log_warn("bad request from pid %d: %s", (int)h.peer.pid, strerror(-r));
-		return;
+		log_warn("bad request from pid %d (uid %u): %s", (int)h.peer.pid, (unsigned)h.peer.uid, strerror(-r));
+		failf(&h, CNI_ERR_DECODE, "malformed request: %s", strerror(-r));
+		goto error;
 	}
 	if (decode_request(&h, wire) < 0)
 		goto error;
 	log_debug("request: pid=%d uid=%u user=%s mode=%s cmd=%s rootless=%d fd=%d",
 		  (int)h.peer.pid, (unsigned)h.peer.uid, h.peer.user,
 		  h.mode == TR_MODE_CNI ? "cni" : "netavark", h.req.command, h.rootless, h.nsfd >= 0);
-
-	/* 2. the connection must come from the trestle client binary */
-	if (peer_verify_client_binary(&h.peer, cfg->client_binary, h.err, sizeof(h.err)) < 0) {
-		h.cni_code = CNI_ERR_PLUGIN;
-		goto error;
-	}
 
 	/* 1. the network must be configured and the user permitted */
 	/* explicit [network:NAME] section, else the [network:*] catch-all */
@@ -800,3 +808,16 @@ done:
 		close(lockfd);   /* releases the lock */
 	tr_request_free(&h.req);
 }
+
+#ifdef TRESTLE_FUZZ
+/* Fuzzing entry point: decode and validate one wire request exactly like
+ * handle_connection() does. Returns 0 if the request was accepted. */
+int handler_fuzz_decode(const char *wire, int nsfd);
+int handler_fuzz_decode(const char *wire, int nsfd)
+{
+	struct hctx h = { .nsfd = nsfd, .nlfd = -1, .mode = TR_MODE_NETAVARK };
+	int r = decode_request(&h, wire);
+	tr_request_free(&h.req);
+	return r;
+}
+#endif

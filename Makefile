@@ -80,7 +80,7 @@ SERVER_LIB_OBJ := $(SERVER_LIB_SRC:%.c=$(BUILD)/%.o)
 
 UNIT_TESTS := $(patsubst tests/unit/%.c,$(BUILD)/tests/%,$(filter-out tests/unit/harness.c,$(wildcard tests/unit/test_*.c)))
 
-.PHONY: all clean check test integration-test install install-selinux uninstall selinux dist rpm deb
+.PHONY: fuzz security-test all clean check test integration-test install install-selinux uninstall selinux dist rpm deb
 
 all: $(BUILD)/trestle $(BUILD)/trestled
 
@@ -171,6 +171,30 @@ rpm: dist
 
 deb:
 	dpkg-buildpackage -us -uc -b
+
+security-test: all
+	tests/security/run.sh $(BUILD)
+
+# ---- fuzzing (clang + libFuzzer) ------------------------------------------
+FUZZ_CC     ?= clang
+FUZZ_FLAGS  := -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined \
+               -DTRESTLE_FUZZ -std=gnu11 -Isrc $(JSONC_CFLAGS) $(DEFS)
+FUZZ_TARGETS := request wire proto config
+FUZZ_BINS   := $(FUZZ_TARGETS:%=$(BUILD)/fuzz/fuzz_%)
+FUZZ_TIME   ?= 60
+
+$(BUILD)/fuzz/fuzz_%: tests/fuzz/fuzz_%.c $(COMMON_SRC) $(SERVER_LIB_SRC)
+	@mkdir -p $(dir $@)
+	$(FUZZ_CC) $(FUZZ_FLAGS) -o $@ $< $(COMMON_SRC) $(SERVER_LIB_SRC) $(JSONC_LIBS)
+
+fuzz: $(FUZZ_BINS)
+	@for t in $(FUZZ_TARGETS); do \
+	  mkdir -p $(BUILD)/fuzz/corpus-$$t; \
+	  cp tests/fuzz/seeds/$$t/* $(BUILD)/fuzz/corpus-$$t/ 2>/dev/null || true; \
+	  echo "== fuzz_$$t ($(FUZZ_TIME)s)"; \
+	  $(BUILD)/fuzz/fuzz_$$t -max_total_time=$(FUZZ_TIME) -max_len=16384 -timeout=10 \
+	    -artifact_prefix=$(BUILD)/fuzz/crash-$$t- $(BUILD)/fuzz/corpus-$$t || exit 1; \
+	done
 
 clean:
 	rm -rf $(BUILD) $(NAME)-$(VERSION).tar.gz

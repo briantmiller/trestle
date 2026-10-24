@@ -1,9 +1,9 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: trestle
-Upstream-Contact: Brian <brian@email.com>
+Upstream-Contact: Brian Miller <brianthomasmiller@gmail.com>
 
 Files: *
-Copyright: 2026 Brian <brian@email.com>
+Copyright: 2026 Brian Miller <brianthomasmiller@gmail.com>
 License: GPL-3+
 
 License: GPL-3+

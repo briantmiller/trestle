@@ -150,6 +150,75 @@ static void test_netavark(void)
 	tr_request_free(&r);
 }
 
+/* hostile input found by the security review */
+static void test_hostile(void)
+{
+	char err[256];
+	struct tr_request r;
+	uint8_t m[6];
+
+	/* container ids are file names in the state directory */
+	CHECK(!tr_valid_container_id("."));
+	CHECK(!tr_valid_container_id(".."));
+	CHECK(!tr_valid_container_id(".hidden"));
+	CHECK(!tr_valid_container_id("-rf"));
+	CHECK(!tr_valid_container_id("a/b"));
+	CHECK(tr_valid_container_id("abc.def-1_2"));
+
+	/* MAC: only plain hex digits */
+	CHECK(!tr_valid_mac("+2:+0:+0:+0:+0:+1", m));
+	CHECK(!tr_valid_mac(" 2: 0: 0: 0: 0: 1", m));
+	CHECK(!tr_valid_mac("02-00-00-00-00-01", m));
+	CHECK(!tr_valid_mac("0x:00:00:00:00:01", m));
+	CHECK(tr_valid_mac("0A:bC:00:00:00:fF", m) && m[0] == 0x0a && m[1] == 0xbc && m[5] == 0xff);
+
+	/* \u0000 would truncate C strings (values and keys) */
+	CHECK(tr_json_has_nul_escape("{\"a\":\"x\\u0000y\"}"));
+	CHECK(tr_json_has_nul_escape("{\"a\\u0000b\":1}"));
+	CHECK(!tr_json_has_nul_escape("{\"a\":\"x\\\\u0000y\"}"));   /* escaped backslash, then text */
+	CHECK(!tr_json_has_nul_escape("{\"a\":\"\\u0001\"}"));
+	CHECK(tr_json_parse_object("{\"a\":\"\\u0000\"}", "x", err, sizeof(err)) == NULL);
+	CHECK_CONTAINS(err, "NUL");
+	CHECK(tr_json_parse_object("{} {}", "x", err, sizeof(err)) == NULL);
+	CHECK(tr_json_parse_object("[]", "x", err, sizeof(err)) == NULL);
+
+	char *setup[] = { "setup", "/run/x" };
+	const char *nul_name = "{\"container_id\":\"abc\",\"container_name\":\"web\\u0000evil\","
+			       "\"network\":{\"name\":\"lab\"},\"network_options\":{\"interface_name\":\"eth0\"}}";
+	CHECK(tr_parse_netavark(2, setup, nul_name, &r, err, sizeof(err)) < 0);
+	tr_request_free(&r);
+	const char *dot_id = "{\"container_id\":\"..\",\"container_name\":\"web\","
+			     "\"network\":{\"name\":\"lab\"},\"network_options\":{\"interface_name\":\"eth0\"}}";
+	CHECK(tr_parse_netavark(2, setup, dot_id, &r, err, sizeof(err)) < 0);
+	tr_request_free(&r);
+	char *nl_path[] = { "setup", "/run/x\n$(id)" };
+	CHECK(tr_parse_netavark(2, nl_path, SETUP, &r, err, sizeof(err)) < 0);
+	tr_request_free(&r);
+
+	/* control characters in the CNI environment */
+	struct env e = ENV_ADD("ADD");
+	e.v[5] = "K8S_POD_NAME=a\nb";
+	expect_cni_fail(&e, CONF, CNI_ERR_INVALID_ENV, "control characters");
+	struct env e2 = ENV_ADD("ADD");
+	e2.v[2] = "/var/run/netns/x\n";
+	expect_cni_fail(&e2, CONF, CNI_ERR_INVALID_ENV, "control characters");
+	struct env e4 = ENV_ADD("ADD");
+	e4.v[5] = "IP=10.0.0.9;$(id)";
+	expect_cni_fail(&e4, CONF, CNI_ERR_INVALID_ENV, "malformed");
+	struct env e5 = ENV_ADD("ADD");
+	e5.v[5] = "=x";
+	expect_cni_fail(&e5, CONF, CNI_ERR_INVALID_ENV, "malformed");
+	static char longpod[200];
+	memset(longpod, 'a', sizeof(longpod) - 1);
+	memcpy(longpod, "K8S_POD_NAME=", 13);
+	struct env e6 = ENV_ADD("ADD");
+	e6.v[5] = longpod;                       /* not truncated into a valid name */
+	expect_cni_fail(&e6, CONF, CNI_ERR_INVALID_ENV, "too long");
+	struct env e3 = ENV_ADD("ADD");
+	e3.v[1] = "..";
+	expect_cni_fail(&e3, CONF, CNI_ERR_INVALID_ENV, "CNI_CONTAINERID");
+}
+
 static void test_error_format(void)
 {
 	char *s = tr_format_cni_error("0.4.0", 7, "bad \"thing\"", NULL);
@@ -167,6 +236,7 @@ int main(void)
 	RUN(test_cni_errors);
 	RUN(test_cni_del_without_netns);
 	RUN(test_netavark);
+	RUN(test_hostile);
 	RUN(test_error_format);
 	TEST_MAIN_END();
 }

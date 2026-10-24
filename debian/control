@@ -1,7 +1,7 @@
 Source: trestle
 Section: net
 Priority: optional
-Maintainer: Brian <brian@email.com>
+Maintainer: Brian Miller <brianthomasmiller@gmail.com>
 Build-Depends: debhelper-compat (= 13), pkgconf | pkg-config, libjson-c-dev
 Standards-Version: 4.6.2
 Rules-Requires-Root: no

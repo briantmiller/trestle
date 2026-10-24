@@ -1,0 +1,5 @@
+127.0.0.1 localhost
+# BEGIN trestle managed entries
+10.0.0.2 a.b.c.trestle
+# END trestle managed entries
+::1 x

@@ -60,6 +60,10 @@ typedef const char *(*tr_env_fn)(void *ctx, const char *name);
 
 void tr_request_free(struct tr_request *r);
 
+/* Parse text that must be exactly one JSON object: no trailing data, no
+ * \u0000 escapes. "what" names the input in error messages. */
+json_object *tr_json_parse_object(const char *text, const char *what, char *err, size_t errlen);
+
 /* Parse and validate a CNI invocation. On failure returns -1, fills err and
  * *cni_code. getenv_fn looks up CNI_* variables. stdin_text may be NULL only
  * for VERSION. */

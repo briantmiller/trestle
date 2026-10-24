@@ -173,7 +173,8 @@ static bool charset_ok(const char *s, size_t maxlen, const char *extra, bool fir
 
 bool tr_valid_network_name(const char *s) { return charset_ok(s, TR_MAX_NAME, "_.-", true); }
 bool tr_valid_container_name(const char *s) { return charset_ok(s, TR_MAX_NAME, "_.-", true); }
-bool tr_valid_container_id(const char *s) { return charset_ok(s, 128, "_.-", false); }
+/* used as a file name in the state directory: no ".", "..", hidden names */
+bool tr_valid_container_id(const char *s) { return charset_ok(s, 128, "_.-", true); }
 bool tr_valid_hostname_label(const char *s) { return charset_ok(s, 63, "_-", false); }
 
 bool tr_valid_ifname(const char *s)
@@ -193,14 +194,17 @@ bool tr_valid_ifname(const char *s)
 
 bool tr_valid_mac(const char *s, uint8_t out[6])
 {
-	unsigned int b[6];
-	char tail;
+	/* exactly xx:xx:xx:xx:xx:xx; sscanf("%2x") would also take signs and
+	 * blanks ("+2: 0:..."), so parse by hand */
 	if (!s || strlen(s) != 17)
 		return false;
-	if (sscanf(s, "%2x:%2x:%2x:%2x:%2x:%2x%c", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5], &tail) != 6)
-		return false;
-	for (int i = 0; i < 6; i++)
-		out[i] = (uint8_t)b[i];
+	for (int i = 0; i < 6; i++) {
+		const char *p = s + 3 * i;
+		if (!isxdigit((unsigned char)p[0]) || !isxdigit((unsigned char)p[1]) || (i < 5 && p[2] != ':'))
+			return false;
+		char hex[3] = { p[0], p[1], 0 };
+		out[i] = (uint8_t)strtoul(hex, NULL, 16);
+	}
 	if (out[0] & 1)   /* multicast bit must be clear */
 		return false;
 	return true;
@@ -354,4 +358,36 @@ uid_t tr_overflow_uid(void)
 		free(s);
 	}
 	return (uid_t)v;
+}
+
+bool tr_has_ctrl(const char *s)
+{
+	for (; s && *s; s++)
+		if ((unsigned char)*s < 0x20 || *s == 0x7f)
+			return true;
+	return false;
+}
+
+/* Does JSON text contain a \u0000 escape inside a string? json-c accepts it
+ * but every consumer here uses C strings, which would silently cut the value
+ * (or a key) at that point. */
+bool tr_json_has_nul_escape(const char *s)
+{
+	bool in_str = false;
+	for (; s && *s; s++) {
+		if (!in_str) {
+			if (*s == '"')
+				in_str = true;
+			continue;
+		}
+		if (*s == '"') {
+			in_str = false;
+		} else if (*s == '\\') {
+			if (s[1] == 'u' && s[2] == '0' && s[3] == '0' && s[4] == '0' && s[5] == '0')
+				return true;
+			if (s[1])
+				s++;
+		}
+	}
+	return false;
 }

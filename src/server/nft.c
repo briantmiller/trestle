@@ -190,7 +190,13 @@ int nft_apply(const struct tr_config *cfg)
 		buf_free(&b);
 		return nft_cleanup(cfg);
 	}
-	log_debug("applying nftables ruleset:\n%s", b.p);
+	log_debug("applying nftables ruleset:");
+	for (const char *l = b.p; l && *l;) {
+		const char *e = strchr(l, '\n');
+		int n = e ? (int)(e - l) : (int)strlen(l);
+		log_debug("  %.*s", n, l);
+		l = e ? e + 1 : NULL;
+	}
 	int r = run_nft(cfg, b.p);
 	if (!r)
 		log_info("nftables table inet %s applied", cfg->nft_table);
