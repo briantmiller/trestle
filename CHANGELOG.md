@@ -38,6 +38,10 @@
 * SELinux: trestled may start transient systemd units, so `systemd-run
   --scope` works for aardvark-dns and the DHCP lease keepers (it failed
   with "Failed to start transient scope unit: Access denied").
+* SELinux: the NetworkManager, systemd-networkd and libvirt checks can read
+  all the profile locations (`/usr/lib/NetworkManager`, ifcfg files,
+  `/run/systemd/network`, libvirt networks), and NetworkManager / polkit may
+  identify trestled as the caller of `nmcli device set … managed no`.
 * Bridges trestle creates get a fixed MAC address, so the gateway MAC no
   longer changes when containers come and go.
 * `make fuzz` gains a DHCP parser target; new `tests/integration/features.sh`.
