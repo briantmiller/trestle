@@ -35,6 +35,9 @@
   rootless clients (reading the client's `/proc/<pid>/exe`, entering and
   configuring their network namespace). Without them rootless Podman failed
   with "cannot read /proc/<pid>/exe: Permission denied".
+* SELinux: trestled may start transient systemd units, so `systemd-run
+  --scope` works for aardvark-dns and the DHCP lease keepers (it failed
+  with "Failed to start transient scope unit: Access denied").
 * Bridges trestle creates get a fixed MAC address, so the gateway MAC no
   longer changes when containers come and go.
 * `make fuzz` gains a DHCP parser target; new `tests/integration/features.sh`.

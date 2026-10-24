@@ -146,10 +146,26 @@ optional_policy(`
 	dontaudit trestled_t iptables_t:process { noatsecure rlimitinh siginh };
 ')
 
-# systemd-run --scope for aardvark-dns
+# systemd-run --scope for aardvark-dns and the DHCP lease keepers: D-Bus
+# to systemd, and permission to start (and look at / stop) transient units.
+# Fedora/RHEL check transient units against init_t (init_start_transient_unit()),
+# the reference policy against systemd_transient_unit_t; written out so the
+# module builds with both.
 optional_policy(`
 	dbus_system_bus_client(trestled_t)
 	init_dbus_chat(trestled_t)
+	gen_require(`
+		type init_t;
+		class service { start stop status };
+	')
+	allow trestled_t init_t:service { start stop status };
+')
+optional_policy(`
+	gen_require(`
+		type systemd_transient_unit_t;
+		class service { start stop status };
+	')
+	allow trestled_t systemd_transient_unit_t:service { start stop status };
 ')
 
 # NetworkManager: read connection profiles and run
