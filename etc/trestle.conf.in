@@ -20,11 +20,17 @@
 #socket_mode = 0777
 
 # Only connections from this binary are accepted (checked through
-# /proc/<pid>/exe). The client checks that the server runs server_binary.
+# /proc/<pid>/exe).
 #client_binary = @LIBEXECDIR@/trestle/trestle
+# The client checks that the socket is served by root. When the socket's
+# directory is writable by others (e.g. /tmp) it also checks that the
+# server runs server_binary; in a root-only directory (the default) only
+# root can have created the socket, so that check is skipped.
 #server_binary = @SBINDIR@/trestled
-# strict  = the client must be able to verify the server binary
-# relaxed = fall back to uid/process-name checks inside user namespaces
+# strict  = always verify the server binary (inside rootless user
+#           namespaces this needs /proc access the kernel usually denies)
+# relaxed = verify it only for sockets in directories others can write to,
+#           falling back to the process name inside user namespaces
 # no      = do not verify the server (not recommended)
 #verify_server = relaxed
 # Require the server to run with this SELinux type (e.g. trestled_t).

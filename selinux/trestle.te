@@ -186,9 +186,8 @@ optional_policy(`
 	allow container_runtime_t trestle_var_lib_t:dir search_dir_perms;
 	allow container_runtime_t trestle_sock_t:sock_file rw_sock_file_perms;
 	allow container_runtime_t trestled_t:unix_stream_socket connectto;
-	allow container_runtime_t trestled_t:dir search;
-	allow container_runtime_t trestled_t:file read_file_perms;
-	allow container_runtime_t trestled_t:lnk_file read_lnk_file_perms;
+	# (clients need no access to the /proc entries of trestled: the socket is in
+	# a root-only directory, so the client does not check the server binary)
 	allow trestled_t container_runtime_t:dir search;
 	allow trestled_t container_runtime_t:file read_file_perms;
 	allow trestled_t container_runtime_t:lnk_file read_lnk_file_perms;
@@ -213,7 +212,4 @@ optional_policy(`
 	allow { unconfined_t unconfined_service_t } trestle_var_lib_t:dir search_dir_perms;
 	allow { unconfined_t unconfined_service_t } trestle_sock_t:sock_file rw_sock_file_perms;
 	allow { unconfined_t unconfined_service_t } trestled_t:unix_stream_socket connectto;
-	allow { unconfined_t unconfined_service_t } trestled_t:dir search;
-	allow { unconfined_t unconfined_service_t } trestled_t:file read_file_perms;
-	allow { unconfined_t unconfined_service_t } trestled_t:lnk_file read_lnk_file_perms;
 ')

@@ -129,8 +129,8 @@ hosts_file = yes
 firewall = yes
 masquerade = yes
 EOF
-# a wrapped daemon (valgrind) is a different binary, so skip that check
-if [ -n "${TRESTLE_IT_WRAPPER:-}" ]; then sed -i "s|^\[global\]|[global]\nverify_server = no|" "$IT/trestle.conf"; fi
+# (a wrapped daemon, e.g. under valgrind, is a different binary; the client
+# does not check it because the socket is in a root-only directory)
 chmod 644 "$IT/trestle.conf"
 export TRESTLE_CONFIG=$IT/trestle.conf
 

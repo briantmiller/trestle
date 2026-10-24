@@ -3,7 +3,7 @@
 ########################################
 ## <summary>
 ##	Allow a domain to run the trestle client: connect to the
-##	trestled socket and verify the daemon process.
+##	trestled socket (and let trestled verify the client process).
 ## </summary>
 ## <param name="domain">
 ##	<summary>
@@ -20,9 +20,6 @@ interface(`trestle_client',`
 	allow $1 trestle_var_lib_t:dir search_dir_perms;
 	allow $1 trestle_sock_t:sock_file rw_sock_file_perms;
 	allow $1 trestled_t:unix_stream_socket connectto;
-	allow $1 trestled_t:dir search;
-	allow $1 trestled_t:file read_file_perms;
-	allow $1 trestled_t:lnk_file read_lnk_file_perms;
 	allow trestled_t $1:dir search;
 	allow trestled_t $1:file read_file_perms;
 	allow trestled_t $1:lnk_file read_lnk_file_perms;

@@ -35,10 +35,15 @@ Path of the trestle client. Connections from any other executable are
 rejected. Default \fI/usr/libexec/trestle/trestle\fR.
 .TP
 .B server_binary
-Path of trestled, checked by the client. Default \fI/usr/sbin/trestled\fR.
+Path of trestled, checked by the client when the socket's directory is
+writable by others, or with \fBverify_server = strict\fR. Default
+\fI/usr/sbin/trestled\fR.
 .TP
 .B verify_server
-\fBstrict\fR, \fBrelaxed\fR (default) or \fBno\fR. See
+\fBrelaxed\fR (default): the peer and the socket file must belong to root;
+the server binary is checked only when the socket lies in a directory others
+can write to (falling back to the process name inside user namespaces).
+\fBstrict\fR: always check the binary. \fBno\fR: no checks. See
 .BR trestle (8).
 .TP
 .B server_selinux_type

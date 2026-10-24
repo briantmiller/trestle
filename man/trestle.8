@@ -45,13 +45,19 @@ owned by a user namespace created by the calling user.
 \fBtrestle info\fR and \fBCNI_COMMAND=VERSION\fR are answered by the client
 itself, so they work while the daemon is stopped.
 .SS Verifying the daemon
-Before sending anything the client checks that the socket is served by a root
-process running the configured \fBserver_binary\fR (see \fBverify_server\fR in
-.BR trestle.conf (5)).
-Inside a rootless user namespace the kernel does not allow reading
-\fI/proc/<pid>/exe\fR of a root process; in the default \fBrelaxed\fR mode the
-client then checks the process name and that the peer and the socket file are
-owned by root (seen as the overflow uid).
+Before sending anything the client checks that the peer process and the
+socket file belong to root (seen as the overflow uid inside a rootless user
+namespace). It then checks the socket's directory and every directory above
+it: when all are owned by root and none can be written by others (sticky
+directories excepted above the last one) \- true for the default
+\fI/var/lib/trestle/trestle.sock\fR \- only root can have created the
+socket and nothing more is checked. Otherwise (for example a socket in
+\fI/tmp\fR), and always with \fBverify_server = strict\fR, the process must
+run the configured \fBserver_binary\fR (\fI/proc/<pid>/exe\fR; inside a
+rootless user namespace the kernel usually denies that, and \fBrelaxed\fR
+falls back to the process name). With \fBserver_selinux_type\fR the
+daemon's SELinux label is checked as well; the kernel reports it even
+across user namespaces.
 .SH NETAVARK
 .TP
 .B create

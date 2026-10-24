@@ -26,6 +26,11 @@
   it can no longer be squatted; `trestled.service` uses `PrivateTmp=yes`.
   `socket = /tmp/trestle.sock` (with `PrivateTmp=no`) still works. SELinux
   type `trestle_tmp_t` is now `trestle_sock_t`.
+* The client checks that the socket's directory chain is root-only instead
+  of checking the server's `/proc/<pid>/exe`; the binary check remains for
+  sockets in directories others can write to and with `verify_server =
+  strict`. Container runtimes no longer get SELinux access to trestled's
+  `/proc` entries.
 * Bridges trestle creates get a fixed MAC address, so the gateway MAC no
   longer changes when containers come and go.
 * `make fuzz` gains a DHCP parser target; new `tests/integration/features.sh`.

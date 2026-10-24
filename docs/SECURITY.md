@@ -17,7 +17,7 @@ request is treated as hostile until proven otherwise.
 | Spoofing between containers | `anti_spoofing` (default on): nftables bridge table binds each port to its MAC and IPv4 address; rogue DHCP servers, IPv6 RA/redirects, VLAN tags and unknown `trv*` ports dropped | A container impersonating another container or the gateway (ARP/IP/MAC spoofing, rogue DHCP) |
 | Tenant separation | `isolation = user \| container` at layer 2 and for routed hairpin traffic | Users reaching each other's containers on a shared bridge |
 | Denial of service | whole request within `request_timeout` (not just each read); at most 64 handlers, `max_requests_per_user` (default 8) per non-root uid | One user keeping all handlers busy with stalled or dripping connections |
-| Server identity (client side) | peer uid root, socket owned by root, `/proc/<pid>/exe` (or process name inside a user namespace), optional SELinux type | A local user squatting the socket path (only possible when `socket` points into a world-writable directory such as `/tmp`) |
+| Server identity (client side) | peer uid root, socket owned by root, socket directory chain root-only; `/proc/<pid>/exe` (or process name inside a user namespace) only when the directory is not root-only or with `verify_server = strict`; optional SELinux type | A local user squatting the socket path (only possible when `socket` points into a world-writable directory such as `/tmp`) |
 
 ### Input handling rules
 
@@ -96,14 +96,24 @@ the root-owned state directory:
   leases and records stay private;
 * the daemon's `/tmp` is private (`PrivateTmp=yes`);
 * `socket_group` + `socket_mode = 0770` restrict access to a group;
-* the client still refuses a socket that is not served by root by the
-  trestled binary, and with SELinux `server_selinux_type = trestled_t`
-  checks the server's label.
+* the client refuses a socket not served by root or not owned by root, and
+  checks that the socket's directory and all directories above it are
+  root-owned and not writable by others. That is what makes the socket
+  trustworthy, so the client no longer looks at the server's
+  `/proc/<pid>/exe` (which rootless clients mostly cannot read anyway; the
+  process-name fallback could be faked by anyone) and container runtimes
+  need no SELinux access to trestled's `/proc` entries;
+* with SELinux, `server_selinux_type = trestled_t` additionally checks the
+  server's label, which the kernel reports even across user namespaces.
 
 The 0.1 location `/tmp/trestle.sock` still works (`socket = /tmp/trestle.sock`
 plus `PrivateTmp=no` in a drop-in for `trestled.service`). There a local user
-could create the file while trestled is stopped; the client's server
-verification then refuses to talk to it, and trestled removes it at start.
+could create the file while trestled is stopped. Because the directory is
+writable by others, the client falls back to checking the server binary
+(`server_binary`) and refuses to talk to anything else; trestled removes the
+file at start. Under SELinux the client domain then also needs read access
+to trestled's `/proc` entries (the policy no longer grants it), or use
+`server_selinux_type` and `verify_server = no`.
 trestled logs a warning when the socket directory is world writable.
 
 ## Hook scripts

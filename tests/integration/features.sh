@@ -31,15 +31,16 @@ for t in ip unshare su useradd nft nsenter ping python3; do
 done
 DNSMASQ=$(command -v dnsmasq || true)
 
+sockpath() { sed -n 's/^socket = //p' "$IT/trestle.conf"; }
 start_server() {
 	"$IT/bin/trestled" -f -c "$IT/trestle.conf" >>"$IT/server.log" 2>&1 &
 	SERVER_PID=$!
-	for _ in $(seq 100); do [ -S "$IT/state/trestle.sock" ] && break; sleep 0.1; done
+	for _ in $(seq 100); do [ -S "$(sockpath)" ] && break; sleep 0.1; done
 }
 stop_server() {
 	[ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null && wait "$SERVER_PID" 2>/dev/null
 	SERVER_PID=
-	rm -f "$IT/state/trestle.sock"
+	rm -f "$(sockpath)"
 }
 
 cleanup() {
@@ -405,6 +406,35 @@ else
 	lacks "hosts entry removed" "$(cat "$IT/hosts")" "dhcpweb"
 	check "user bridge left alone" ip link show trfx-lan
 fi
+
+# ---------------------------------------------------------------- server check
+say "client verification of the server"
+userctl() { su $U1 -s /bin/sh -c "TRESTLE_CONFIG=$IT/trestle.conf $IT/bin/trestlectl status" 2>&1; }
+cp "$IT/trestle.conf" "$IT/trestle.conf.orig"
+stop_server
+sed -i "s|^server_binary = .*|server_binary = /usr/bin/false|" "$IT/trestle.conf"
+start_server
+contains "root-only socket directory: the server binary is not checked" "$(ctl status)" "NETWORK"
+contains "...also not for rootless users" "$(userctl)" "NETWORK"
+stop_server
+sed -i "s|^\[global\]|[global]\nverify_server = strict|" "$IT/trestle.conf"
+start_server
+contains "verify_server = strict still checks the binary" "$(ctl status)" "refusing to talk to"
+stop_server
+cp "$IT/trestle.conf.orig" "$IT/trestle.conf"
+mkdir -p "$IT/pub"; chmod 1777 "$IT/pub"
+sed -i "s|^socket = .*|socket = $IT/pub/trestle.sock|; s|^server_binary = .*|server_binary = /usr/bin/false|" "$IT/trestle.conf"
+start_server
+contains "socket in a world-writable directory: the binary is checked" "$(ctl status)" "refusing to talk to"
+contains "daemon warns about the world-writable socket directory" "$(cat "$IT/server.log")" "is world writable (sticky)"
+stop_server
+sed -i "s|^server_binary = .*|server_binary = $IT/bin/trestled|" "$IT/trestle.conf"
+start_server
+contains "...and accepted when it is trestled" "$(ctl status)" "NETWORK"
+stop_server
+cp "$IT/trestle.conf.orig" "$IT/trestle.conf"
+start_server
+check "back on the default layout" test -S "$IT/state/trestle.sock"
 
 # ---------------------------------------------------------------- teardown
 say "teardown"

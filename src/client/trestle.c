@@ -145,16 +145,71 @@ static bool root_like(uid_t uid, bool in_userns, uid_t ovf)
 }
 
 /*
+ * Can only root create or replace the socket? True when the socket's
+ * directory is owned by root and not writable by group/others, and every
+ * directory above it is owned by root and either not writable by
+ * group/others or sticky (others may add entries there but cannot rename
+ * or remove root's). Inside a user namespace root appears as the overflow
+ * uid; the mode bits are visible as they are.
+ */
+static bool socket_dir_safe(const char *sock_path, bool in_userns, uid_t ovf, char *why, size_t whylen)
+{
+	char dir[PATH_MAX], real[PATH_MAX];
+	tr_strlcpy(dir, sock_path, sizeof(dir));
+	char *slash = strrchr(dir, '/');
+	if (!slash) {
+		snprintf(why, whylen, "socket path is relative");
+		return false;
+	}
+	if (slash == dir)
+		slash[1] = '\0';
+	else
+		*slash = '\0';
+	if (!realpath(dir, real)) {   /* symlinks resolved: their targets are checked */
+		snprintf(why, whylen, "%s: %s", dir, strerror(errno));
+		return false;
+	}
+	bool last = true;
+	for (;;) {
+		struct stat st;
+		if (lstat(real, &st) < 0 || !S_ISDIR(st.st_mode)) {
+			snprintf(why, whylen, "%s is not a directory", real);
+			return false;
+		}
+		if (!root_like(st.st_uid, in_userns, ovf)) {
+			snprintf(why, whylen, "%s is owned by uid %u", real, (unsigned)st.st_uid);
+			return false;
+		}
+		if ((st.st_mode & 022) && (last || !(st.st_mode & S_ISVTX))) {
+			snprintf(why, whylen, "%s is writable by %s", real, (st.st_mode & 002) ? "everyone" : "its group");
+			return false;
+		}
+		if (!strcmp(real, "/"))
+			return true;
+		char *s = strrchr(real, '/');
+		if (s == real)
+			s[1] = '\0';
+		else
+			*s = '\0';
+		last = false;
+	}
+}
+
+/*
  * Make sure the process listening on the socket is the real trestle server.
  *
  *  - the peer (SO_PEERCRED) must be root (seen as the overflow uid when we
  *    run inside a rootless user namespace),
  *  - the socket file must be a socket owned by root (same rule),
- *  - /proc/<pid>/exe must point to the configured server binary. Inside a
- *    rootless user namespace the kernel does not allow reading another
- *    user's exe link; in "relaxed" mode we then fall back to checking
- *    /proc/<pid>/comm, in "strict" mode we refuse.
- *  - optionally the SELinux type of the peer (server_selinux_type).
+ *  - when only root can create the socket (socket_dir_safe(), true for the
+ *    default /var/lib/trestle/trestle.sock), that is enough: whatever
+ *    listens there is root. Otherwise (e.g. socket = /tmp/trestle.sock),
+ *    and always with verify_server = strict, /proc/<pid>/exe must point to
+ *    the configured server binary. Inside a rootless user namespace the
+ *    kernel does not allow reading another user's exe link; "relaxed" then
+ *    falls back to /proc/<pid>/comm, "strict" refuses.
+ *  - optionally the SELinux type of the peer (server_selinux_type), which
+ *    the kernel reports even across user namespaces.
  */
 static int verify_server(int sock, const struct tr_config *cfg, char *err, size_t errlen)
 {
@@ -187,12 +242,19 @@ static int verify_server(int sock, const struct tr_config *cfg, char *err, size_
 		return -1;
 	}
 
+	char why[PATH_MAX + 64] = "";
+	bool dir_safe = socket_dir_safe(cfg->socket_path, in_userns, ovf, why, sizeof(why));
+	if (!dir_safe)
+		log_debug("socket directory not root-only (%s); checking the server binary", why);
+
 	char want[PATH_MAX];
 	if (!realpath(cfg->server_binary, want))
 		tr_strlcpy(want, cfg->server_binary, sizeof(want));
 
-	bool verified = false;
-	if (cr.pid > 0) {
+	bool verified = dir_safe && cfg->verify_server != TR_VERIFY_STRICT;
+	if (verified) {
+		/* only root can have created the socket: nothing to add */
+	} else if (cr.pid > 0) {
 		char p[64], got[PATH_MAX];
 		snprintf(p, sizeof(p), "/proc/%d/exe", (int)cr.pid);
 		ssize_t n = readlink(p, got, sizeof(got) - 1);
@@ -232,7 +294,8 @@ static int verify_server(int sock, const struct tr_config *cfg, char *err, size_
 		return -1;
 	}
 	if (!verified)
-		log_debug("server binary could not be verified from this namespace; relying on uid checks");
+		log_warn("%s is in a directory other users can write to (%s) and the server binary cannot be "
+			 "verified from this namespace; relying on uid checks", cfg->socket_path, why);
 
 	if (cfg->server_selinux_type[0]) {
 		char label[256];
