@@ -47,6 +47,13 @@ files_type(trestle_script_exec_t)
 #
 
 allow trestled_t self:capability { net_admin sys_admin sys_ptrace dac_override dac_read_search chown fowner kill net_bind_service };
+# The same capabilities used inside user namespaces (rootless Podman): the
+# kernel checks them against the namespace owning the target, and SELinux
+# then checks class cap_userns instead of capability. Needed to read the
+# client's /proc/<pid>/exe (sys_ptrace), setns() into its network namespace
+# (sys_admin), create and configure interfaces there (net_admin) and bind
+# the DHCP client port there (net_bind_service).
+allow trestled_t self:cap_userns { net_admin sys_admin sys_ptrace dac_override dac_read_search chown fowner kill net_bind_service };
 allow trestled_t self:process { signal signull sigkill getsched setfscreate };
 allow trestled_t self:fifo_file rw_fifo_file_perms;
 allow trestled_t self:unix_stream_socket { create_stream_socket_perms listen accept connectto };

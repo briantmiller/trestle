@@ -31,6 +31,10 @@
   sockets in directories others can write to and with `verify_server =
   strict`. Container runtimes no longer get SELinux access to trestled's
   `/proc` entries.
+* SELinux: `cap_userns` permissions for trestled, needed when it works on
+  rootless clients (reading the client's `/proc/<pid>/exe`, entering and
+  configuring their network namespace). Without them rootless Podman failed
+  with "cannot read /proc/<pid>/exe: Permission denied".
 * Bridges trestle creates get a fixed MAC address, so the gateway MAC no
   longer changes when containers come and go.
 * `make fuzz` gains a DHCP parser target; new `tests/integration/features.sh`.
