@@ -17,7 +17,9 @@
   own CNI attachments) and `STATUS` (code 50 when the daemon is down or the
   pool is exhausted).
 * **trestlectl**: `status`, `list`, `leases`, `gc [--dry-run]`, `detach`,
-  `--json`.
+  `--json`. `status` includes DNS: per network aardvark / dnsmasq / hosts or
+  off, whether aardvark-dns runs and runs in `trestle-aardvark-dns.scope`,
+  and whether each network's dnsmasq runs.
 * **ipam = dhcp**: containers on LAN bridges get their address from the LAN
   DHCP server; trestled acts as the client for the container's MAC and a
   keeper process renews and releases the lease.

@@ -277,7 +277,7 @@ static int aardvark_start(const struct tr_config *cfg)
 		/* leave stderr: aardvark's errors end up in our journal */
 		if (use_systemd)
 			execl("/usr/bin/systemd-run", "systemd-run", "-q", "--scope",
-			      "--unit=trestle-aardvark-dns", "--collect",
+			      "--unit=" AARDVARK_SCOPE_NAME, "--collect",
 			      cfg->aardvark_binary, "--config", cfg->aardvark_dir, "-p", port, "run",
 			      (char *)NULL);
 		else
@@ -398,4 +398,76 @@ void dns_refresh(const struct tr_config *cfg, const struct tr_network *net)
 		dnsmasq_refresh(cfg, net);
 	if (net->aardvark_dns)
 		aardvark_refresh(cfg, net);
+}
+
+/* ---- status (trestlectl status) --------------------------------------- */
+
+/* systemd unit of a process from /proc/<pid>/cgroup (v2 "0::/...", or the
+ * v1 name=systemd hierarchy): the last path component, e.g.
+ * "trestle-aardvark-dns.scope". */
+void dns_cgroup_unit(const char *cgroup, char *out, size_t outlen)
+{
+	out[0] = '\0';
+	char *t = strdup(cgroup ? cgroup : "");
+	if (!t)
+		return;
+	char *save = NULL, *path = NULL;
+	for (char *line = strtok_r(t, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+		if (!strncmp(line, "0::", 3))
+			path = line + 3;
+		else if (strstr(line, ":name=systemd:") && !path)
+			path = strstr(line, ":name=systemd:") + 14;
+	}
+	if (path) {
+		const char *last = strrchr(path, '/');
+		tr_strlcpy(out, last ? last + 1 : path, outlen);
+	}
+	free(t);
+}
+
+static void process_unit(pid_t pid, char *out, size_t outlen)
+{
+	char p[64];
+	out[0] = '\0';
+	snprintf(p, sizeof(p), "/proc/%d/cgroup", (int)pid);
+	char *t = tr_read_file(p, 65536, NULL);
+	if (t)
+		dns_cgroup_unit(t, out, outlen);
+	free(t);
+}
+
+void aardvark_status(const struct tr_config *cfg, struct aardvark_state *st)
+{
+	memset(st, 0, sizeof(*st));
+	st->needed = aardvark_has_networks(cfg);
+	st->pid = aardvark_pid(cfg);
+	st->systemd = access("/run/systemd/system", F_OK) == 0 && access("/usr/bin/systemd-run", X_OK) == 0;
+	tr_strlcpy(st->expected_unit, AARDVARK_SCOPE, sizeof(st->expected_unit));
+	if (st->pid > 0)
+		process_unit(st->pid, st->unit, sizeof(st->unit));
+	st->in_scope = st->pid > 0 && !strcmp(st->unit, AARDVARK_SCOPE);
+}
+
+int dnsmasq_status(const struct tr_network *net, char *file, size_t filelen)
+{
+	if (!net->dnsmasq_hosts[0])
+		return -2;
+	config_expand_path(net->dnsmasq_hosts, net->name, file, filelen);
+	if (!net->dnsmasq_pid_file[0])
+		return -1;
+	char *t = tr_read_file(net->dnsmasq_pid_file, 64, NULL);
+	long pid = 0;
+	if (t) {
+		if (!tr_parse_int(tr_trim(t), 2, INT_MAX, &pid))
+			pid = 0;
+		free(t);
+	}
+	if (pid <= 0 || kill((pid_t)pid, 0) < 0)
+		return 0;
+	char p[64];
+	snprintf(p, sizeof(p), "/proc/%ld/comm", pid);
+	char *comm = tr_read_file(p, 64, NULL);
+	bool ok = comm && !strcmp(tr_trim(comm), "dnsmasq");
+	free(comm);
+	return ok ? (int)pid : 0;
 }

@@ -35,8 +35,14 @@ and passes the same identity checks.
 .B status
 Networks (configured, created from \fB[network:*]\fR, or with state left),
 their bridge (\fB*\fR = currently absent), subnet, IPAM mode, isolation,
-anti-spoofing, number of attachments and free addresses. Non-root users
-see the networks they may use.
+anti-spoofing, number of attachments, free addresses and name publication
+(\fBDNS\fR: \fBaardvark\fR, \fBdnsmasq\fR, \fBhosts\fR, or \fBoff\fR).
+Below the table: whether aardvark-dns is running and whether it runs in its
+systemd scope \fBtrestle-aardvark-dns.scope\fR (from \fI/proc/<pid>/cgroup\fR;
+\fBOUTSIDE\fR means it was started some other way), or \fBNOT RUNNING\fR
+while networks need it; and for every network with \fBdnsmasq_hosts\fR the
+hosts file and whether the dnsmasq from \fBdnsmasq_pid_file\fR runs.
+Non-root users see the networks they may use.
 .TP
 .B list
 Attachments: network, container id and name, user, host and container

@@ -971,9 +971,43 @@ static int do_admin(struct hctx *h, char **out)
 			json_object_object_add(e, "free_addresses", fr < 0 ? NULL : json_object_new_int64(fr));
 			struct nl_link l;
 			json_object_object_add(e, "bridge_present", json_object_new_boolean(nl_get_link(h->nlfd, n->bridge, &l) == 0));
+			/* name publication */
+			json_object *dns = json_object_new_array();
+			if (n->aardvark_dns)
+				json_object_array_add(dns, json_object_new_string("aardvark"));
+			if (n->dnsmasq_hosts[0])
+				json_object_array_add(dns, json_object_new_string("dnsmasq"));
+			if (n->hosts_file)
+				json_object_array_add(dns, json_object_new_string("hosts"));
+			json_object_object_add(e, "dns", dns);
+			char dfile[PATH_MAX];
+			int dpid = dnsmasq_status(n, dfile, sizeof(dfile));
+			if (dpid != -2) {
+				json_object *dm = json_object_new_object();
+				json_object_object_add(dm, "hosts_file", json_object_new_string(dfile));
+				json_object_object_add(dm, "pid_file", n->dnsmasq_pid_file[0] ?
+						       json_object_new_string(n->dnsmasq_pid_file) : NULL);
+				json_object_object_add(dm, "running", dpid == -1 ? NULL : json_object_new_boolean(dpid > 0));
+				json_object_object_add(dm, "pid", dpid > 0 ? json_object_new_int(dpid) : NULL);
+				json_object_object_add(e, "dnsmasq", dm);
+			}
 			json_object_array_add(arr, e);
 		}
 		json_object_object_add(o, "networks", arr);
+		struct aardvark_state as;
+		aardvark_status(cfg, &as);
+		json_object *ad = json_object_new_object();
+		json_object_object_add(ad, "needed", json_object_new_boolean(as.needed));
+		json_object_object_add(ad, "running", json_object_new_boolean(as.pid > 0));
+		json_object_object_add(ad, "pid", as.pid > 0 ? json_object_new_int(as.pid) : NULL);
+		json_object_object_add(ad, "systemd", json_object_new_boolean(as.systemd));
+		json_object_object_add(ad, "unit", as.unit[0] ? json_object_new_string(as.unit) : NULL);
+		json_object_object_add(ad, "expected_unit", json_object_new_string(as.expected_unit));
+		json_object_object_add(ad, "in_scope", json_object_new_boolean(as.in_scope));
+		json_object_object_add(ad, "binary", json_object_new_string(cfg->aardvark_binary));
+		json_object_object_add(ad, "config_dir", json_object_new_string(cfg->aardvark_dir));
+		json_object_object_add(ad, "port", json_object_new_int(cfg->aardvark_port));
+		json_object_object_add(o, "aardvark", ad);
 		break;
 	}
 	case TR_CMD_ADM_LIST: {

@@ -91,6 +91,8 @@ ip_forward = yes
 [network:sec]
 users = root
 subnet = 10.233.0.1/24
+dnsmasq_hosts = $IT/sec.hosts
+dnsmasq_pid_file = $IT/dnsmasq.pid
 
 [network:open]
 users = root
@@ -270,7 +272,18 @@ starts() { grep -c . "$IT/aardvark-starts"; }
 wait_start() { for _ in $(seq "$2"); do [ "$(starts)" -gt "$1" ] && return 0; sleep 1; done; return 1; }
 check "aardvark-dns running" test -s "$IT/aardvark/aardvark.pid"
 contains "aardvark config lists the containers" "$(cat "$IT/aardvark/iso" 2>/dev/null)" "iso1aaaa"
+out=$(ctl status)
+contains "status: DNS column shows aardvark" "$out" "aardvark"
+contains "status: DNS off for a network without name publication" "$(grep '^solo ' <<<"$out")" "off"
+contains "status: dnsmasq output listed" "$out" "dnsmasq (sec): $IT/sec.hosts"
+contains "status: aardvark-dns running" "$out" "aardvark-dns: running (pid $(cat "$IT/aardvark/aardvark.pid")"
+contains "status: no systemd here, so no scope" "$out" "no systemd, so no trestle-aardvark-dns.scope"
+jout=$(ctl status --json)
+check "status --json reports the aardvark unit check" python3 -c "
+import json,sys; a=json.loads(sys.argv[1])['aardvark']
+assert a['running'] and a['expected_unit']=='trestle-aardvark-dns.scope' and a['in_scope'] is False" "$jout"
 n=$(starts); kill -9 "$(cat "$IT/aardvark/aardvark.pid")"
+contains "status: dead aardvark-dns reported" "$(ctl status)" "aardvark-dns: NOT RUNNING, but networks need it"
 wait_start "$n" 40 && ok "dead aardvark-dns is restarted within 30 s" || bad "dead aardvark-dns is restarted within 30 s"
 stop_server
 n=$(starts); kill -9 "$(cat "$IT/aardvark/aardvark.pid")"
@@ -401,6 +414,7 @@ else
 	D=$(cni ADD dh1 /var/run/netns/fxd eth0 K8S_POD_NAME=dhcpweb lan)
 	ID=$(ipof "$D")
 	contains "lease from the LAN DHCP server" "$ID" "192.168.77.1"
+	contains "status: dnsmasq from dnsmasq_pid_file is running" "$(ctl status)" "dnsmasq running, pid $(cat "$IT/dnsmasq.pid")"
 	contains "gateway from the lease" "$D" '"gateway":"192.168.77.1"'
 	contains "DNS servers from the lease" "$D" '"nameservers":["192.168.77.53"]'
 	contains "container got the address" "$(ip -n fxd -4 addr show eth0)" "$ID/24"

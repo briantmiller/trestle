@@ -27,4 +27,24 @@ void aardvark_ensure(const struct tr_config *cfg);
 /* Networks need aardvark-dns but it is not running. */
 bool aardvark_down(const struct tr_config *cfg);
 
+#define AARDVARK_SCOPE_NAME "trestle-aardvark-dns"
+#define AARDVARK_SCOPE AARDVARK_SCOPE_NAME ".scope"
+
+struct aardvark_state {
+	bool needed;            /* some network has entries for aardvark-dns */
+	pid_t pid;              /* 0 = not running */
+	bool systemd;           /* trestled starts it through systemd-run --scope */
+	char unit[256];         /* systemd unit the process is in ("" = unknown) */
+	char expected_unit[64];
+	bool in_scope;          /* unit == trestle-aardvark-dns.scope */
+};
+void aardvark_status(const struct tr_config *cfg, struct aardvark_state *st);
+/* systemd unit (last cgroup path component) from /proc/<pid>/cgroup text */
+void dns_cgroup_unit(const char *cgroup, char *out, size_t outlen);
+
+/* dnsmasq output of a network: -2 = none, else the hosts file in file and
+ * the pid of the dnsmasq from dnsmasq_pid_file (0 = not running, -1 = no
+ * pid file configured). */
+int dnsmasq_status(const struct tr_network *net, char *file, size_t filelen);
+
 #endif

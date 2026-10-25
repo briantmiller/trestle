@@ -257,6 +257,24 @@ static void test_port_security(void)
 	t_rmrf(state);
 }
 
+static void test_cgroup_unit(void)
+{
+	char u[128];
+	dns_cgroup_unit("0::/system.slice/trestle-aardvark-dns.scope\n", u, sizeof(u));
+	CHECK_STR(u, "trestle-aardvark-dns.scope");
+	/* cgroup v1 (RHEL 8): the name=systemd hierarchy counts */
+	dns_cgroup_unit("12:pids:/system.slice/trestled.service\n1:name=systemd:/system.slice/trestle-aardvark-dns.scope\n",
+			u, sizeof(u));
+	CHECK_STR(u, "trestle-aardvark-dns.scope");
+	/* hybrid: the unified line wins */
+	dns_cgroup_unit("1:name=systemd:/system.slice/x.service\n0::/system.slice/trestled.service\n", u, sizeof(u));
+	CHECK_STR(u, "trestled.service");
+	dns_cgroup_unit("0::/\n", u, sizeof(u));
+	CHECK_STR(u, "");
+	dns_cgroup_unit("", u, sizeof(u));
+	CHECK_STR(u, "");
+}
+
 static void writefile(const char *path, const char *text)
 {
 	char dir[512];
@@ -437,6 +455,7 @@ int main(void)
 	RUN(test_hosts_block);
 	RUN(test_nft);
 	RUN(test_port_security);
+	RUN(test_cgroup_unit);
 	RUN(test_foreign_manager);
 	RUN(test_proto);
 	RUN(test_acl);

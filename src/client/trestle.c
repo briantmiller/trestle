@@ -432,17 +432,55 @@ static void ctl_print(const struct tr_request *r, json_object *o)
 	case TR_CMD_ADM_STATUS: {
 		json_object *a = ja(o, "networks");
 		printf("trestled %s, stale state sweep every %s s\n\n", js(o, "version"), js(o, "gc_interval"));
-		printf("%-20s %-16s %-18s %-7s %-10s %-9s %8s %6s\n", "NETWORK", "BRIDGE", "SUBNET", "IPAM",
-		       "ISOLATION", "ANTISPOOF", "ATTACHED", "FREE");
+		printf("%-20s %-16s %-18s %-7s %-10s %-9s %8s %6s  %s\n", "NETWORK", "BRIDGE", "SUBNET", "IPAM",
+		       "ISOLATION", "ANTISPOOF", "ATTACHED", "FREE", "DNS");
 		for (size_t i = 0; a && i < json_object_array_length(a); i++) {
 			json_object *e = json_object_array_get_idx(a, i);
 			char br[24];
 			snprintf(br, sizeof(br), "%s%s", js(e, "bridge"), jb(e, "bridge_present") ? "" : "*");
-			printf("%-20s %-16s %-18s %-7s %-10s %-9s %8s %6s\n", js(e, "name"), br, js(e, "subnet"),
+			char dns[64] = "";
+			json_object *d = ja(e, "dns");
+			for (size_t k = 0; d && k < json_object_array_length(d); k++)
+				snprintf(dns + strlen(dns), sizeof(dns) - strlen(dns), "%s%s", k ? "," : "",
+					 json_object_get_string(json_object_array_get_idx(d, k)));
+			printf("%-20s %-16s %-18s %-7s %-10s %-9s %8s %6s  %s\n", js(e, "name"), br, js(e, "subnet"),
 			       js(e, "ipam"), js(e, "isolation"), jb(e, "anti_spoofing") ? "yes" : "no",
-			       js(e, "attachments"), js(e, "free_addresses"));
+			       js(e, "attachments"), js(e, "free_addresses"), dns[0] ? dns : "off");
 		}
+
 		printf("\n(* = bridge does not exist right now)\n");
+
+		/* DNS: aardvark-dns (one process for all networks) and dnsmasq files */
+		json_object *ad;
+		printf("\nDNS\n");
+		if (json_object_object_get_ex(o, "aardvark", &ad)) {
+			const char *unit = js(ad, "unit"), *want = js(ad, "expected_unit");
+			if (jb(ad, "running")) {
+				if (jb(ad, "in_scope"))
+					printf("  aardvark-dns: running (pid %s, %s)\n", js(ad, "pid"), unit);
+				else if (!jb(ad, "systemd"))
+					printf("  aardvark-dns: running (pid %s; no systemd, so no %s)\n", js(ad, "pid"), want);
+				else
+					printf("  aardvark-dns: running (pid %s) OUTSIDE %s (in %s)\n", js(ad, "pid"), want, unit);
+			} else if (jb(ad, "needed")) {
+				printf("  aardvark-dns: NOT RUNNING, but networks need it (%s); trestled retries every 30 s\n",
+				       js(ad, "binary"));
+			} else {
+				printf("  aardvark-dns: not running (no container on an aardvark_dns network)\n");
+			}
+		}
+		for (size_t i = 0; a && i < json_object_array_length(a); i++) {
+			json_object *e = json_object_array_get_idx(a, i), *dm;
+			if (!json_object_object_get_ex(e, "dnsmasq", &dm) || !dm)
+				continue;
+			json_object *rv;
+			const char *state = !json_object_object_get_ex(dm, "running", &rv) || !rv ? "no dnsmasq_pid_file, not signalled"
+					    : jb(dm, "running") ? "dnsmasq running" : "dnsmasq NOT RUNNING";
+			char pidtxt[32] = "";
+			if (jb(dm, "running"))
+				snprintf(pidtxt, sizeof(pidtxt), ", pid %s", js(dm, "pid"));
+			printf("  dnsmasq (%s): %s (%s%s)\n", js(e, "name"), js(dm, "hosts_file"), state, pidtxt);
+		}
 		break;
 	}
 	case TR_CMD_ADM_LIST: {
