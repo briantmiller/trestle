@@ -224,6 +224,17 @@ static pid_t aardvark_pid(const struct tr_config *cfg)
 	}
 	if (pid > 0 && kill((pid_t)pid, 0) < 0)
 		pid = 0;
+	if (pid > 0) {
+		/* the pid must still be aardvark-dns (not reused, not a zombie) */
+		char sp[64], st[512];
+		snprintf(sp, sizeof(sp), "/proc/%ld/stat", pid);
+		char *s = tr_read_file(sp, sizeof(st), NULL);
+		const char *open_p = s ? strchr(s, '(') : NULL, *close_p = s ? strrchr(s, ')') : NULL;
+		if (!open_p || !close_p || close_p < open_p || strncmp(open_p + 1, "aardvark-dns", 12) != 0 ||
+		    close_p[1] != ' ' || close_p[2] == 'Z' || close_p[2] == 'X')
+			pid = 0;
+		free(s);
+	}
 	return (pid_t)pid;
 }
 
@@ -286,20 +297,20 @@ static int aardvark_start(const struct tr_config *cfg)
 	return 0;
 }
 
-static void aardvark_refresh(const struct tr_config *cfg, const struct tr_network *net)
+/* Write the network's aardvark-dns config from the attachment records.
+ * Returns 0, or -1 if it could not be written. */
+static int aardvark_write(const struct tr_config *cfg, const struct tr_network *net)
 {
 	char path[PATH_MAX], gw[16];
 	int r = tr_mkdir_p(cfg->aardvark_dir, 0755);
 	if (r) {
 		log_err("cannot create %s: %s", cfg->aardvark_dir, strerror(-r));
-		return;
+		return -1;
 	}
 	snprintf(path, sizeof(path), "%s/%s", cfg->aardvark_dir, net->name);
-
 	struct buf entries = { 0 };
 	struct collect_ctx c = { .net = net, .aardvark = &entries };
 	state_foreach(cfg->state_dir, net->name, collect_cb, &c);
-
 	if (c.nv_count == 0) {
 		unlink(path);
 	} else {
@@ -311,10 +322,56 @@ static void aardvark_refresh(const struct tr_config *cfg, const struct tr_networ
 		if (r) {
 			log_err("cannot write %s: %s", path, strerror(-r));
 			buf_free(&entries);
-			return;
+			return -1;
 		}
 	}
 	buf_free(&entries);
+	return 0;
+}
+
+bool aardvark_down(const struct tr_config *cfg)
+{
+	return aardvark_has_networks(cfg) && aardvark_pid(cfg) == 0;
+}
+
+void aardvark_ensure(const struct tr_config *cfg)
+{
+	struct netset ns;
+	struct strv keep = { 0 };
+	netset_load(cfg, &ns);
+	for (size_t i = 0; i < ns.n; i++)
+		if (ns.all[i]->aardvark_dns) {
+			aardvark_write(cfg, ns.all[i]);
+			strv_push(&keep, ns.all[i]->name);
+		}
+	netset_free(&ns);
+	/* configs of networks that no longer use aardvark-dns */
+	DIR *d = opendir(cfg->aardvark_dir);
+	if (d) {
+		struct dirent *de;
+		while ((de = readdir(d)))
+			if (de->d_name[0] != '.' && strcmp(de->d_name, "aardvark.pid") &&
+			    !strstr(de->d_name, ".trestle-tmp.") && !strv_contains(&keep, de->d_name)) {
+				char p[PATH_MAX];
+				snprintf(p, sizeof(p), "%s/%s", cfg->aardvark_dir, de->d_name);
+				unlink(p);
+			}
+		closedir(d);
+	}
+	strv_clear(&keep);
+	pid_t pid = aardvark_pid(cfg);
+	if (pid > 0) {
+		kill(pid, SIGHUP);
+	} else if (aardvark_has_networks(cfg)) {
+		log_info("aardvark-dns is not running; starting it");
+		aardvark_start(cfg);
+	}
+}
+
+static void aardvark_refresh(const struct tr_config *cfg, const struct tr_network *net)
+{
+	if (aardvark_write(cfg, net) < 0)
+		return;
 
 	pid_t pid = aardvark_pid(cfg);
 	if (pid > 0) {

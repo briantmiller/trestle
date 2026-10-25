@@ -38,11 +38,17 @@ mkdir -p "$D/state" "$D/aardvark" "$D/asan"; chmod 755 "$D"; chmod 1777 "$D/asan
 install -m 0755 "$BUILD/trestled" "$D/"
 cp "$HERE/attack.py" "$D/"; chmod 644 "$D/attack.py"
 printf '127.0.0.1 localhost\n' > "$D/hosts"
-cat > "$D/aardvark-dns" <<'A'
+cat > "$D/aardvark-dns-loop" <<'A'
 #!/bin/sh
-setsid sh -c 'echo $$ > "$1/aardvark.pid"; trap "" HUP; while :; do sleep 1; done' x "$2" >/dev/null 2>&1 &
+echo $$ > "$1/aardvark.pid"; trap "" HUP
+while :; do sleep 1; done
+A
+cat > "$D/aardvark-dns" <<A
+#!/bin/sh
+setsid $D/aardvark-dns-loop "\$2" >/dev/null 2>&1 &
 sleep 0.2
 A
+chmod 755 "$D/aardvark-dns-loop"
 chmod 755 "$D/aardvark-dns"
 cat > "$D/trestle.conf" <<C
 [global]

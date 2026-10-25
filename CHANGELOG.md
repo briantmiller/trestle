@@ -49,6 +49,13 @@
   removes empty bridges trestle created earlier. `create_script` therefore
   runs only when the bridge is created, and `TRESTLE_PODMAN_NETWORK_ID` is
   gone.
+* aardvark-dns is supervised: its configs are rebuilt from the records and
+  it is started if needed at daemon start, on reload and on every sweep, and
+  checked every 30 s, so a crashed aardvark-dns comes back. The pid is only
+  trusted if it still is aardvark-dns.
+* SELinux: transient units also need `system { start status }` on `init_t`;
+  `trestle_tmp_t` is kept as an alias of `trestle_sock_t` so sockets
+  labeled before the rename do not become `unlabeled_t`.
 * Bridges trestle creates get a fixed MAC address, so the gateway MAC no
   longer changes when containers come and go.
 * `make fuzz` gains a DHCP parser target; new `tests/integration/features.sh`.

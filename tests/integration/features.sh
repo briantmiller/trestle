@@ -48,6 +48,7 @@ cleanup() {
 	for p in $PIDS_NS; do kill "$p" 2>/dev/null; done
 	for f in "$IT"/state/dhcp/*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done
 	[ -f "$IT/dnsmasq.pid" ] && kill "$(cat "$IT/dnsmasq.pid")" 2>/dev/null
+	[ -f "$IT/aardvark/aardvark.pid" ] && kill "$(cat "$IT/aardvark/aardvark.pid")" 2>/dev/null
 	for ns in fxa fxb fxc fxd fxe fxg fxk1 fxk2 fxo fxs1 fxs2 fxt1 fxt2; do ip netns del $ns 2>/dev/null; done
 	for l in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -E '^(trv|tbr|trfx)'); do
 		ip link del "$l" 2>/dev/null
@@ -82,6 +83,8 @@ hosts_path = $IT/hosts
 log_level = debug
 nft_table = trestlefx
 networkmanager = no
+aardvark_binary = $IT/bin/aardvark-dns
+aardvark_dir = $IT/aardvark
 gc_interval = 10
 ip_forward = yes
 
@@ -98,6 +101,7 @@ anti_spoofing = no
 users = root, $U1, $U2
 subnet = 10.234.0.1/24
 isolation = user
+aardvark_dns = yes
 
 [network:solo]
 users = root
@@ -117,6 +121,19 @@ hosts_file = yes
 EOF
 chmod 644 "$IT/trestle.conf"
 export TRESTLE_CONFIG=$IT/trestle.conf
+# fake aardvark-dns (process name aardvark-dns-loop, like the real one's pid file)
+cat > "$IT/bin/aardvark-dns-loop" <<'A'
+#!/bin/sh
+echo $$ > "$1/aardvark.pid"; trap "" HUP; trap "exit 0" TERM
+while :; do sleep 1; done
+A
+cat > "$IT/bin/aardvark-dns" <<A
+#!/bin/sh
+echo start >> $IT/aardvark-starts
+setsid $IT/bin/aardvark-dns-loop "\$2" >/dev/null 2>&1 &
+sleep 0.3
+A
+chmod 755 "$IT/bin/aardvark-dns" "$IT/bin/aardvark-dns-loop"; touch "$IT/aardvark-starts"
 start_server
 
 cni() { # cmd id netns ifname args net
@@ -247,6 +264,19 @@ nsenter -t $P1 -n ip route add "$I3/32" via 10.234.0.1
 nsenter -t $P1 -n ip neigh flush all
 check "same user through the host (routed hairpin)" upi $P1 "$I2"
 if upi $P1 "$I3"; then bad "routing through the host does not bypass isolation"; else ok "routing through the host does not bypass isolation"; fi
+
+# aardvark-dns serves the isolated network; trestled keeps it running
+starts() { grep -c . "$IT/aardvark-starts"; }
+wait_start() { for _ in $(seq "$2"); do [ "$(starts)" -gt "$1" ] && return 0; sleep 1; done; return 1; }
+check "aardvark-dns running" test -s "$IT/aardvark/aardvark.pid"
+contains "aardvark config lists the containers" "$(cat "$IT/aardvark/iso" 2>/dev/null)" "iso1aaaa"
+n=$(starts); kill -9 "$(cat "$IT/aardvark/aardvark.pid")"
+wait_start "$n" 40 && ok "dead aardvark-dns is restarted within 30 s" || bad "dead aardvark-dns is restarted within 30 s"
+stop_server
+n=$(starts); kill -9 "$(cat "$IT/aardvark/aardvark.pid")"
+start_server
+wait_start "$n" 5 && ok "aardvark-dns found dead is started at daemon start" || bad "aardvark-dns found dead is started at daemon start"
+contains "...with its config rebuilt from the records" "$(cat "$IT/aardvark/iso" 2>/dev/null)" "iso3cccc"
 
 ip netns add fxs1; ip netns add fxs2
 S1=$(ipof "$(cni ADD fxs1 /var/run/netns/fxs1 eth0 K8S_POD_NAME=s1 solo)")

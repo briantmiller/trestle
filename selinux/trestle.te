@@ -34,6 +34,9 @@ files_type(trestle_var_run_t)
 # the socket: /var/lib/trestle/trestle.sock (default), or /tmp/trestle.sock
 # (0.1 default, still possible)
 type trestle_sock_t;
+# the type was called trestle_tmp_t until 0.2: keep files labeled with the
+# old name valid across the upgrade (else they become unlabeled_t)
+typealias trestle_sock_t alias trestle_tmp_t;
 files_type(trestle_sock_t)
 files_tmp_file(trestle_sock_t)
 
@@ -157,8 +160,11 @@ optional_policy(`
 	gen_require(`
 		type init_t;
 		class service { start stop status };
+		class system { start status };
 	')
 	allow trestled_t init_t:service { start stop status };
+	# StartTransientUnit is also checked as a manager operation
+	allow trestled_t init_t:system { start status };
 ')
 optional_policy(`
 	gen_require(`

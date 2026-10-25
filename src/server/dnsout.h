@@ -21,5 +21,10 @@ char *hosts_replace_block(const char *orig, const char *block);
 
 /* Stop aardvark-dns when no network uses it anymore (shutdown). */
 void aardvark_stop(const struct tr_config *cfg);
+/* Rewrite every aardvark-dns config from the records and make sure
+ * aardvark-dns runs when any network needs it (start, reload, sweeps). */
+void aardvark_ensure(const struct tr_config *cfg);
+/* Networks need aardvark-dns but it is not running. */
+bool aardvark_down(const struct tr_config *cfg);
 
 #endif

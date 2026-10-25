@@ -225,6 +225,7 @@ static void run_gc(const struct tr_config *cfg)
 			 rep.removed.n, rep.leases.n, rep.keepers.n);
 	gc_report_free(&rep);
 	close(nlfd);
+	aardvark_ensure(cfg);
 }
 
 /* Is path somewhere below dir? */
@@ -282,6 +283,7 @@ static int prepare_runtime(const struct tr_config *cfg)
 	run_gc(cfg);
 	nft_apply(cfg);
 	hosts_refresh_all(cfg);
+	aardvark_ensure(cfg);   /* e.g. it died while trestled was stopped */
 	if (lock >= 0)
 		close(lock);
 	fwd_bind_all(cfg);   /* re-establish firewalld zones of existing bridges */
@@ -470,6 +472,27 @@ int main(int argc, char **argv)
 			}
 			if (gp > 0)
 				kid_add(gp, (uid_t)-1);
+		}
+		/* aardvark-dns died: bring it back without waiting for the sweep */
+		static time_t next_dns_check;
+		if (now >= next_dns_check) {
+			next_dns_check = now + 30;
+			if (aardvark_down(&cfg) && g_children < MAX_CHILDREN) {
+				pid_t ap = fork();
+				if (ap == 0) {
+					close(L.fd);
+					close(lockfd);
+					signal(SIGTERM, SIG_DFL);
+					signal(SIGHUP, SIG_IGN);
+					signal(SIGCHLD, SIG_DFL);
+					int lk = state_lock(cfg.state_dir, true);
+					if (lk >= 0)
+						aardvark_ensure(&cfg);
+					_exit(0);
+				}
+				if (ap > 0)
+					kid_add(ap, (uid_t)-1);
+			}
 		}
 		int timeout = 30000;
 		if (cfg.gc_interval && (next_gc - now) * 1000 < timeout)

@@ -92,6 +92,13 @@ attachments whose host veth is gone are removed together with their lease,
 DNS entries and DHCP keeper, orphaned leases are released and lost DHCP
 keepers are restarted (the container network namespace is found again
 through \fI/run/netns\fR or \fI/proc/*/ns/net\fR).
+.SH AARDVARK-DNS
+For networks with \fBaardvark_dns\fR, trestled writes one aardvark-dns
+configuration per network into \fBaardvark_dir\fR and runs aardvark-dns
+(in the systemd scope \fBtrestle-aardvark-dns.scope\fR). At start, on
+reload and on every sweep the configurations are rebuilt from the
+attachment records; every 30 s trestled checks that aardvark-dns still runs
+and starts it again if it does not.
 .SH DHCP KEEPERS
 For networks with \fBipam = dhcp\fR, \fBtrestled \-\-dhcp\-keeper\fR
 \fInetwork\fR \fIcontainer-id\fR runs once per container (in a systemd scope

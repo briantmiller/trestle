@@ -62,15 +62,23 @@ chmod 755 "$IT"
 install -m 0755 "$BUILD/trestle" "$BUILD/trestled" "$IT/bin/"
 printf '127.0.0.1 localhost\n' > "$IT/hosts"
 
-# fake aardvark-dns: daemonizes, writes aardvark.pid, logs SIGHUPs
-cat > "$IT/bin/aardvark-dns" <<'EOF'
+# fake aardvark-dns: daemonizes, writes aardvark.pid, logs SIGHUPs and starts.
+# The daemon part is a script named aardvark-dns-loop so its process name
+# looks like aardvark-dns (trestled checks /proc/<pid>/stat).
+cat > "$IT/bin/aardvark-dns-loop" <<'EOF'
 #!/bin/sh
-dir=$2
-setsid sh -c 'echo $$ > "$1/aardvark.pid"; echo $$ > "$1/../fake-aardvark.pid"; trap "echo hup >> $1/../hups" HUP; trap "exit 0" TERM; while :; do sleep 1; done' x "$dir" >/dev/null 2>&1 &
+echo $$ > "$1/aardvark.pid"; echo $$ > "$1/../fake-aardvark.pid"
+trap "echo hup >> $1/../hups" HUP; trap "exit 0" TERM
+while :; do sleep 1; done
+EOF
+cat > "$IT/bin/aardvark-dns" <<EOF
+#!/bin/sh
+echo start >> $IT/aardvark-starts
+setsid $IT/bin/aardvark-dns-loop "\$2" >/dev/null 2>&1 &
 sleep 0.3
 exit 0
 EOF
-chmod 755 "$IT/bin/aardvark-dns"
+chmod 755 "$IT/bin/aardvark-dns" "$IT/bin/aardvark-dns-loop"
 
 # fake nmcli: NetworkManager "running", logs every call
 cat > "$IT/bin/nmcli" <<EOF
@@ -310,6 +318,12 @@ contains "aardvark names" "$(cat "$AFILE" 2>/dev/null)" "webapp,webapp-alias,$U1
 check "aardvark-dns started" test -s "$IT/aardvark/aardvark.pid"
 for _ in $(seq 30); do [ -s "$IT/hups" ] && break; sleep 0.1; done
 check "aardvark-dns got SIGHUP on update" test -s "$IT/hups"
+# aardvark-dns dies: trestled notices within 30 s and starts it again
+kill -9 "$(cat "$IT/aardvark/aardvark.pid")"
+starts=$(grep -c . "$IT/aardvark-starts")
+for _ in $(seq 40); do [ "$(grep -c . "$IT/aardvark-starts")" -gt "$starts" ] && break; sleep 1; done
+[ "$(grep -c . "$IT/aardvark-starts")" -gt "$starts" ] && ok "dead aardvark-dns is restarted" || bad "dead aardvark-dns is restarted"
+check "...with the network's config in place" grep -q aaaa1111 "$AFILE"
 contains "hosts has rootless entry" "$(cat "$IT/hosts")" "$U1.webapp.itnet.trestle"
 
 RE=$(cat $HO/setup-aaaa1111.env 2>/dev/null)
